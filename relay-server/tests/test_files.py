@@ -4,7 +4,7 @@ import os
 import uuid
 from pathlib import Path
 
-from conftest import fetch, register_agent, settings
+from conftest import create_group, fetch, register_agent, settings
 
 PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
@@ -12,8 +12,13 @@ PNG_BYTES = bytes.fromhex(
 )
 
 
-def upload(client, secret, path, target_type, target, client_msg_id=None, caption=None):
-    data = {"target_type": target_type, "target": target}
+def upload(client, secret, path, target_type, target_name, target_id,
+           client_msg_id=None, caption=None):
+    data = {
+        "target_type": target_type,
+        "target_name": target_name,
+        "target_id": target_id,
+    }
     if client_msg_id:
         data["client_msg_id"] = client_msg_id
     else:
@@ -37,7 +42,7 @@ def test_upload_direct_and_download_roundtrip(client, tmp_path):
     payload = os.urandom(64 * 1024)
     src.write_bytes(payload)
 
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b", caption="Dataset")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"], caption="Dataset")
     assert r.status_code == 201, r.text
     data = r.json()["data"]
     assert data["file_id"].startswith("fl_")
@@ -78,7 +83,7 @@ def test_non_recipient_cannot_download(client, tmp_path):
 
     src = tmp_path / "rahasia.txt"
     src.write_bytes(b"isi rahasia")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     file_id = r.json()["data"]["file_id"]
 
     r = client.get(
@@ -94,7 +99,7 @@ def test_download_without_auth(client, tmp_path):
     b = register_agent(client, "hermes-b")
     src = tmp_path / "x.txt"
     src.write_bytes(b"x")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     r = client.get(f"/api/v1/download-file/{r.json()['data']['file_id']}")
     assert r.status_code == 401
 
@@ -112,7 +117,7 @@ def test_upload_to_unknown_agent(client, tmp_path):
     a = register_agent(client, "hermes-a")
     src = tmp_path / "x.txt"
     src.write_bytes(b"x")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-ghost")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-ghost", "ag_0000000000")
     assert r.status_code == 404
 
 
@@ -121,7 +126,7 @@ def test_blocked_extension(client, tmp_path):
     b = register_agent(client, "hermes-b")
     src = tmp_path / "malware.exe"
     src.write_bytes(b"MZ")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     # Target valid tapi ekstensi diblokir: 415. Tidak ada file tersisa.
     assert r.status_code == 415
     assert r.json()["code"] == "UNSUPPORTED_TYPE"
@@ -133,7 +138,7 @@ def test_blocked_extension_with_valid_recipient(client, tmp_path):
     b = register_agent(client, "hermes-b")
     src = tmp_path / "virus.bat"
     src.write_bytes(b"@echo off")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     assert r.status_code == 415
 
 
@@ -151,7 +156,8 @@ def test_dangerous_filename_sanitized(client, tmp_path):
                 files={"file": (dangerous, f, "application/octet-stream")},
                 data={
                     "target_type": "direct",
-                    "target": "hermes-b",
+                    "target_id": b["agent_id"],
+                    "target_name": "hermes-b",
                     "client_msg_id": str(uuid.uuid4()),
                 },
             )
@@ -181,7 +187,7 @@ def test_upload_over_limit_rejected_no_leftover(client, tmp_path, monkeypatch):
 
     src = tmp_path / "big.bin"
     src.write_bytes(os.urandom(4096))
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     assert r.status_code == 413
     assert r.json()["code"] == "FILE_TOO_LARGE"
     assert list(settings.filemanager_dir.iterdir()) == []
@@ -196,10 +202,7 @@ def test_group_file_all_members_download(client, tmp_path):
     c = register_agent(client, "hermes-c")
     outsider = register_agent(client, "hermes-x")
 
-    client.post(
-        "/api/v1/groups", headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     for agent in (b, c):
         client.post(
             "/api/v1/groups/research-team/join",
@@ -210,7 +213,10 @@ def test_group_file_all_members_download(client, tmp_path):
     payload = b"id,nilai\n1,10\n2,20\n" * 100
     src.write_bytes(payload)
 
-    r = upload(client, a["secret_key"], src, "group", "research-team", caption="Dataset scraping")
+    r = upload(
+        client, a["secret_key"], src, "group", "research-team",
+        group["group_id"], caption="Dataset scraping",
+    )
     assert r.status_code == 201
     file_id = r.json()["data"]["file_id"]
 
@@ -240,11 +246,11 @@ def test_duplicate_upload_client_msg_id(client, tmp_path):
     src.write_bytes(b"isi")
     client_msg_id = str(uuid.uuid4())
 
-    r1 = upload(client, a["secret_key"], src, "direct", "hermes-b", client_msg_id=client_msg_id)
+    r1 = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"], client_msg_id=client_msg_id)
     assert r1.status_code == 201
     file_id = r1.json()["data"]["file_id"]
 
-    r2 = upload(client, a["secret_key"], src, "direct", "hermes-b", client_msg_id=client_msg_id)
+    r2 = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"], client_msg_id=client_msg_id)
     assert r2.status_code == 200
     assert r2.json()["data"]["duplicate"] is True
     assert r2.json()["data"]["file_id"] == file_id
@@ -262,7 +268,7 @@ def test_deleted_file_returns_410(client, tmp_path):
     b = register_agent(client, "hermes-b")
     src = tmp_path / "doc.txt"
     src.write_bytes(b"isi")
-    r = upload(client, a["secret_key"], src, "direct", "hermes-b")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     file_id = r.json()["data"]["file_id"]
 
     conn = connect()
@@ -293,7 +299,8 @@ def test_png_upload_content_type(client, tmp_path):
             files={"file": ("pixel.png", f, "image/png")},
             data={
                 "target_type": "direct",
-                "target": "hermes-b",
+                "target_id": b["agent_id"],
+                "target_name": "hermes-b",
                 "client_msg_id": str(uuid.uuid4()),
             },
         )

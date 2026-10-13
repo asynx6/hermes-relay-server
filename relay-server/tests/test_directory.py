@@ -1,5 +1,5 @@
 """Test direktori: agent bisa melihat siapa saja yang terdaftar dan grup apa yang ada."""
-from conftest import register_agent
+from conftest import create_group, register_agent
 
 
 def test_list_agents_requires_auth(client):
@@ -52,11 +52,8 @@ def test_list_groups_membership_flag(client):
     b = register_agent(client, "hermes-b")
     c = register_agent(client, "hermes-c")
 
-    client.post(
-        "/api/v1/groups",
-        headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
+    assert group["group_id"].startswith("gr_")
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -72,6 +69,7 @@ def test_list_groups_membership_flag(client):
         groups = groups_for(agent["secret_key"])
         assert len(groups) == 1
         assert groups[0]["name"] == "research-team"
+        assert groups[0]["group_id"] == group["group_id"]
         assert groups[0]["is_member"] is True
         assert groups[0]["member_count"] == 2
         assert groups[0]["joined_at"]

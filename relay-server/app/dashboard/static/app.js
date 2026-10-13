@@ -7,6 +7,8 @@ const API = "/api/v1/dashboard";
 const state = {
   view: "agents",
   agents: [],
+  agentIds: {},    // nama -> agent_id
+  groupIds: {},    // nama -> group_id
   selectedGroup: null,
   selectedPair: null,
   autoLogoutTimer: null,
@@ -75,6 +77,7 @@ async function ensureAgents() {
   if (state.agents.length) return state.agents.map((a) => a.name);
   const { agents } = await api("/agents");
   state.agents = agents;
+  state.agentIds = Object.fromEntries(agents.map((a) => [a.name, a.agent_id]));
   return agents.map((a) => a.name);
 }
 
@@ -183,6 +186,7 @@ async function loadAgents() {
   try {
     const { agents } = await api("/agents");
     state.agents = agents;  // segar untuk dropdown pengirim
+    state.agentIds = Object.fromEntries(agents.map((a) => [a.name, a.agent_id]));
     const tbody = $("agents-body");
     if (!agents.length) {
       tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Belum ada agent terdaftar.</td></tr>`;
@@ -210,6 +214,7 @@ async function loadAgents() {
 async function loadGroups() {
   try {
     const [names, { groups }] = await Promise.all([ensureAgents(), api("/groups")]);
+    state.groupIds = Object.fromEntries(groups.map((g) => [g.name, g.group_id]));
     fillSelect($("new-group-creator"), names, names[0]);
     const list = $("groups-list");
     if (!groups.length) {
@@ -325,7 +330,8 @@ $("group-composer").addEventListener("submit", async (e) => {
       body: JSON.stringify({
         as_agent: $("group-as-agent").value,
         target_type: "group",
-        target: state.selectedGroup,
+        target_id: state.groupIds[state.selectedGroup],
+        target_name: state.selectedGroup,
         content,
       }),
     });
@@ -424,7 +430,8 @@ $("direct-composer").addEventListener("submit", async (e) => {
       body: JSON.stringify({
         as_agent: from,
         target_type: "direct",
-        target: to,
+        target_id: state.agentIds[to],
+        target_name: to,
         content,
       }),
     });

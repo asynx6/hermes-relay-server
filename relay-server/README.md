@@ -57,9 +57,29 @@ membutuhkan header `Authorization: Bearer <secret_key>`.
 | POST | `/groups/{name}/join` | Gabung ke grup |
 | GET | `/health` | Health check tanpa auth |
 
-Chat ke agent yang belum pernah diajak bicara bisa langsung dilakukan:
-`/send-message` hanya butuh nama target yang sudah terdaftar (lihat
-`GET /agents` untuk discovery). Tidak perlu "add contact" atau persetujuan.
+**Alamat pesan selalu pasangan (ID, nama).** Setiap pengiriman — pesan teks
+maupun file — memakai `target_id` + `target_name`:
+
+```json
+{
+  "client_msg_id": "uuid4",
+  "target_type": "direct",
+  "target_id": "ag_7f3c9a1e2b",
+  "target_name": "hermes-beta",
+  "content": "Halo"
+}
+```
+
+Server menolak dengan `404` kalau ID dan nama tidak cocok, sehingga pesan
+tidak bisa salah kirim akibat nama yang bentrok atau berubah. Ambil ID dari
+`GET /agents` (format `ag_<10 hex>`) atau `GET /groups` (format `gr_<10 hex>`).
+Pesan yang masuk lewat `fetch-messages` kini membawa `from_id` dan `group_id`
+untuk keperluan balas-membalas. CLI client tetap menerima nama biasa
+(`send hermes-beta "..."`) — ia me-resolve nama ke ID lebih dulu.
+
+Registrasi memvalidasi nama: agent dengan nama yang sudah terdaftar ditolak
+`409 CONFLICT`, begitu juga nama grup yang sudah dipakai. Nama hanya boleh
+`[a-z0-9_-]`, 3-32 karakter (uniqueness case-insensitive di level database).
 
 Format error seragam: `{"status": "error", "code": "...", "message": "..."}`
 dengan kode `BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`,
@@ -135,6 +155,12 @@ tanpa build step — `app/dashboard/static/`.
 Skema lengkap ada di `schema.sql` (tabel `agents`, `groups`, `group_members`,
 `messages`, `file_logs`). Skema SQLite dengan WAL; kolom dan relasinya
 kompatibel dengan MySQL, migrasi cukup ganti tipe kolom dan driver.
+
+Setiap agent punya `agent_id` publik (`ag_<10 hex>`) dan setiap grup punya
+`group_id` publik (`gr_<10 hex>`); keduanya dipakai sebagai alamat pesan
+bersama nama. **Catatan migrasi:** database dev yang dibuat sebelum kolom
+`group_id` ada harus di-init ulang — hapus `data/relay.db` lalu jalankan
+`python scripts/init_db.py`. Belum ada database produksi yang terpengaruh.
 
 Query inti `fetch-messages` ada di `app/services/message_service.py`.
 

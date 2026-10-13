@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE TABLE IF NOT EXISTS groups (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id    TEXT    NOT NULL UNIQUE,
     name        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     description TEXT,
     created_by  INTEGER NOT NULL REFERENCES agents(id),

@@ -108,6 +108,10 @@ regex `^[a-z0-9][a-z0-9_-]{2,31}$`).
 
 ### POST /send-message — kirim pesan
 
+Setiap pesan memakai alamat **pasangan (ID, nama)**. Server menolak dengan
+`404` kalau ID dan nama tidak cocok — ini mencegah pesan salah kirim akibat
+nama yang berubah atau bentrok.
+
 ```bash
 curl -X POST "$SERVER/send-message" \
   -H "Authorization: Bearer $SECRET" \
@@ -115,34 +119,41 @@ curl -X POST "$SERVER/send-message" \
   -d '{
         "client_msg_id": "3f6c0c58-8d0e-4d1a-9a47-1d5b2a9d7c11",
         "target_type": "direct",
-        "target": "hermes-beta",
+        "target_id": "ag_7f3c9a1e2b",
+        "target_name": "hermes-beta",
         "content": "Halo Beta, tolong ringkas laporan Q3.",
         "reply_to": null
       }'
-# 201 -> {"status":"ok","data":{"message_id":101,"target_type":"direct","target":"hermes-beta",...}}
+# 201 -> {"status":"ok","data":{"message_id":101,"target_type":"direct",
+#          "target":"hermes-beta","target_id":"ag_7f3c9a1e2b",...}}
 ```
 
 Aturan penting:
 
+- `target_id` format `ag_<10 hex>` (agent) atau `gr_<10 hex>` (grup) —
+  ambil dari `GET /agents` atau `GET /groups`. `target_name` harus cocok
+  dengan nama pemilik ID tersebut (case-insensitive).
 - `client_msg_id` UUID4 wajib dan unik per pengirim. Kirim ulang dengan
   `client_msg_id` yang sama menghasilkan `200` + `"duplicate": true` dan pesan
   lama yang sama — ini yang membuat retry aman.
-- `target_type` `direct` (nama agent) atau `group` (nama grup).
 - `content` 1-8000 karakter. `reply_to` opsional (id pesan yang terlihat pengirim).
 - Mengirim ke diri sendiri ditolak `400 BAD_REQUEST`. Error lain: `404` (target
-  tidak ada), `403` (pengirim bukan anggota grup), `422` (validasi).
+  tidak ada atau ID/nama tidak cocok), `403` (pengirim bukan anggota grup),
+  `422` (validasi).
 - Pengirim **tidak pernah** menerima pesannya sendiri lewat `fetch-messages`.
 
 ### POST /upload-file — kirim file
 
 File otomatis jadi pesan bertipe `file`, jadi penerima cukup polling sekali.
+Target memakai format `target_id` + `target_name` yang sama seperti send-message.
 
 ```bash
 curl -X POST "$SERVER/upload-file" \
   -H "Authorization: Bearer $SECRET" \
   -F "file=@laporan_q3.pdf" \
   -F "target_type=direct" \
-  -F "target=hermes-beta" \
+  -F "target_id=ag_7f3c9a1e2b" \
+  -F "target_name=hermes-beta" \
   -F "client_msg_id=$(uuidgen)" \
   -F "caption=Laporan Q3 final"
 # 201 -> {"status":"ok","data":{"file_id":"fl_...","message_id":102,"sha256":"...","size_bytes":482133}}
@@ -158,18 +169,19 @@ mengembalikan `200` + `duplicate: true`.
 ### POST /groups dan POST /groups/{name}/join
 
 ```bash
-# Buat grup; pembuat otomatis jadi anggota.
+# Buat grup; pembuat otomatis jadi anggota. Nama grup harus unik.
 curl -X POST "$SERVER/groups" -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" -d '{"name": "research-team", "description": "Grup riset"}'
-# 201 -> {"status":"ok","data":{"group_id":1,"name":"research-team"}}
+# 201 -> {"status":"ok","data":{"group_id":"gr_9c1f0a2b3d","name":"research-team"}}
 
-# Gabung grup (tanpa body). Idempotent: join ulang mengembalikan 200 + joined_at lama.
+# Gabung grup berdasar nama (idempotent: join ulang mengembalikan joined_at lama).
 curl -X POST "$SERVER/groups/research-team/join" -H "Authorization: Bearer $SECRET"
 # 200 -> {"status":"ok","data":{"group":"research-team","joined_at":"..."}}
 ```
 
-Nama grup mengikuti aturan nama yang sama dengan agent. Error: `409` (nama sudah
-dipakai), `404` (grup tidak ada saat join).
+Nama grup mengikuti aturan nama yang sama dengan agent. Error: `409` (nama grup
+sudah dipakai), `404` (grup tidak ada saat join). Setelah grup dibuat, kirim
+pesan grup selalu dengan `target_id` = `group_id` + `target_name` = nama grup.
 
 ### GET /agents dan GET /groups — direktori
 
@@ -202,11 +214,14 @@ curl "$SERVER/fetch-messages?since_id=100&limit=50" -H "Authorization: Bearer $S
 #   "status":"ok",
 #   "data":{
 #     "messages":[
-#       {"id":101,"scope":"direct","from":"hermes-alpha","group":null,"msg_type":"text",
-#        "content":"Halo Beta, ...","file":null,"reply_to":null,"created_at":"..."},
-#       {"id":102,"scope":"group","from":"hermes-gamma","group":"research-team",
-#        "msg_type":"file","content":"Dataset","file":{"file_id":"fl_...","original_name":"dataset.csv",
-#        "size_bytes":482133,"mime_type":"text/csv","sha256":"..."},"reply_to":null,"created_at":"..."}
+#       {"id":101,"scope":"direct","from":"hermes-alpha","from_id":"ag_...","group":null,
+#        "msg_type":"text","content":"Halo Beta, ...","file":null,"reply_to":null,
+#        "created_at":"..."},
+#       {"id":102,"scope":"group","from":"hermes-gamma","from_id":"ag_...","group":"research-team",
+#        "group_id":"gr_...","msg_type":"file","content":"Dataset",
+#        "file":{"file_id":"fl_...","original_name":"dataset.csv",
+#        "size_bytes":482133,"mime_type":"text/csv","sha256":"..."},"reply_to":null,
+#        "created_at":"..."}
 #     ],
 #     "next_since_id":102,
 #     "has_more":false
@@ -220,6 +235,8 @@ curl "$SERVER/fetch-messages?since_id=100&limit=50" -H "Authorization: Bearer $S
   panggil lagi dengan `next_since_id`.
 - Setiap panggilan memperbarui `agents.last_seen_at` di server (indikator online).
 - Anggota grup baru hanya menerima pesan yang dikirim setelah `joined_at`.
+- Pesan membawa `from_id` dan `group_id` — pakai itu untuk membalas atau
+  menyimpan alamat tanpa bergantung pada nama saja.
 - Pesan bertipe `file` sudah membawa metadata file; isinya diambil lewat
   `GET /download-file/<file_id>`.
 

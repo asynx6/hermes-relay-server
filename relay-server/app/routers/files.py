@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..config import settings
 from ..database import connect
 from ..ratelimit import limiter
-from ..schemas import UUID4_PATTERN
+from ..schemas import PUBLIC_ID_PATTERN, UUID4_PATTERN
 from ..security import api_error, get_current_agent
 from ..services import file_service, message_service
 
@@ -29,7 +29,8 @@ async def upload_file(
     request: Request,
     file: UploadFile = File(...),
     target_type: str = Form(...),
-    target: str = Form(...),
+    target_id: str = Form(..., pattern=PUBLIC_ID_PATTERN),
+    target_name: str = Form(..., min_length=3, max_length=32),
     client_msg_id: str = Form(..., pattern=UUID4_PATTERN),
     caption: str | None = Form(default=None, max_length=500),
     agent=Depends(get_current_agent),
@@ -74,12 +75,12 @@ async def upload_file(
             )
 
         if target_type == "direct":
-            if target.strip().lower() == agent["name"].lower():
+            if target_name.strip().lower() == agent["name"].lower():
                 raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim file ke diri sendiri.")
-            recipient = message_service.resolve_direct_target(conn, target)
+            recipient = message_service.resolve_direct_target(conn, target_id, target_name)
             recipient_id, group_id = recipient["id"], None
         else:
-            group = message_service.resolve_group_target(conn, target)
+            group = message_service.resolve_group_target(conn, target_id, target_name)
             message_service.ensure_group_member(conn, group["id"], agent["id"])
             recipient_id, group_id = None, group["id"]
 

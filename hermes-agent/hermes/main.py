@@ -49,14 +49,39 @@ def open_memory(args) -> Memory:
     )
 
 
+def resolve_agent(api, name: str) -> tuple[str, str]:
+    """Nama agent -> (agent_id, nama). Error jelas kalau belum terdaftar."""
+    for a in api.list_agents():
+        if a["name"].lower() == name.lower():
+            return a["agent_id"], a["name"]
+    raise SystemExit(
+        f"Agent '{name}' tidak terdaftar. Jalankan 'agents' untuk melihat daftar."
+    )
+
+
+def resolve_group(api, name: str) -> tuple[str, str]:
+    """Nama grup -> (group_id, nama). Error jelas kalau grup tidak ada."""
+    for g in api.list_groups():
+        if g["name"].lower() == name.lower():
+            return g["group_id"], g["name"]
+    raise SystemExit(
+        f"Grup '{name}' tidak ditemukan. Jalankan 'groups' untuk melihat daftar."
+    )
+
+
 def send_and_record(api: RelayAPI, memory: Memory, scope: str, peer: str,
-                    content: str, msg_type: str = "text",
+                    peer_id: str, content: str, msg_type: str = "text",
                     file_id: str | None = None) -> dict:
-    """Simpan ke outbox, kirim, lalu tandai terkirim. Aman untuk retry."""
+    """Simpan ke outbox (dengan ID peer), kirim, lalu tandai terkirim.
+    Aman untuk retry karena client_msg_id idempotent."""
     client_msg_id = str(uuid.uuid4())
-    memory.save_outgoing(scope, peer, content, client_msg_id, msg_type, file_id)
+    memory.save_outgoing(scope, peer, peer_id, content, client_msg_id, msg_type, file_id)
     data = api.send_message(
-        "group" if scope == "group" else "direct", peer, content, client_msg_id
+        "group" if scope == "group" else "direct",
+        target_id=peer_id,
+        target_name=peer,
+        content=content,
+        client_msg_id=client_msg_id,
     )
     row = memory.conn.execute(
         "SELECT id FROM conversations WHERE client_msg_id = ?", (client_msg_id,)
@@ -66,14 +91,16 @@ def send_and_record(api: RelayAPI, memory: Memory, scope: str, peer: str,
 
 
 def cmd_send(config, api, memory, args) -> int:
-    data = send_and_record(api, memory, "direct", args.target, " ".join(args.message))
-    print(f"Terkirim (message_id={data['message_id']}, duplicate={data['duplicate']})")
+    target_id, target_name = resolve_agent(api, args.target)
+    data = send_and_record(api, memory, "direct", target_name, target_id, " ".join(args.message))
+    print(f"Terkirim ke {target_name} ({target_id}) — message_id={data['message_id']}, duplicate={data['duplicate']}")
     return 0
 
 
 def cmd_send_group(config, api, memory, args) -> int:
-    data = send_and_record(api, memory, "group", args.group, " ".join(args.message))
-    print(f"Terkirim ke grup (message_id={data['message_id']}, duplicate={data['duplicate']})")
+    group_id, group_name = resolve_group(api, args.group)
+    data = send_and_record(api, memory, "group", group_name, group_id, " ".join(args.message))
+    print(f"Terkirim ke grup {group_name} ({group_id}) — message_id={data['message_id']}, duplicate={data['duplicate']}")
     return 0
 
 
@@ -81,12 +108,15 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
     path = Path(args.path)
     if not path.is_file():
         raise SystemExit(f"File tidak ditemukan: {path}")
+    target_id, target_name = resolve_agent(api, args.target)
     caption = " ".join(args.caption) if args.caption else ""
     client_msg_id = str(uuid.uuid4())
-    data = api.upload_file(str(path), "direct", args.target, client_msg_id, caption)
+    data = api.upload_file(
+        str(path), "direct", target_id, target_name, client_msg_id, caption
+    )
     # Pesan file tersimpan sebagai pesan bertipe file dengan caption.
     memory.save_outgoing(
-        "direct", args.target, caption or f"[file {path.name}]",
+        "direct", target_name, target_id, caption or f"[file {path.name}]",
         client_msg_id, msg_type="text", file_id=data["file_id"],
     )
     row = memory.conn.execute(
@@ -95,18 +125,18 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
     memory.mark_sent(row["id"], data["message_id"])
     upload_row = memory.record_file(
         file_id=data["file_id"], direction="upload", scope="direct",
-        peer=args.target, original_name=path.name, size_bytes=data["size_bytes"],
+        peer=target_name, original_name=path.name, size_bytes=data["size_bytes"],
     )
     memory.update_file_status(
         upload_row, "done", local_path=str(path), sha256=data["sha256"]
     )
-    print(f"File terkirim (file_id={data['file_id']}, message_id={data['message_id']})")
+    print(f"File terkirim ke {target_name} ({target_id}) — file_id={data['file_id']}, message_id={data['message_id']}")
     return 0
 
 
 def cmd_create_group(config, api, memory, args) -> int:
     data = api.create_group(args.name, " ".join(args.description) if args.description else None)
-    print(f"Grup dibuat: {data['name']} (id={data['group_id']})")
+    print(f"Grup dibuat: {data['name']} (group_id={data['group_id']})")
     return 0
 
 
@@ -148,7 +178,7 @@ def cmd_list_groups(config, api, memory, args) -> int:
         return 0
     for g in groups:
         status = "anggota" if g["is_member"] else "bukan anggota"
-        print(f"{g['name']:<24} {g['member_count']} anggota  [{status}]")
+        print(f"{g['group_id']:<14} {g['name']:<24} {g['member_count']} anggota  [{status}]")
     return 0
 
 

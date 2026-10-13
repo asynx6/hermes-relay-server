@@ -8,7 +8,7 @@ from pathlib import Path
 import jwt
 import pytest
 
-from conftest import fetch, register_agent, send
+from conftest import create_group, fetch, register_agent, send
 
 API = "/api/v1/dashboard"
 
@@ -157,20 +157,20 @@ def test_conversation_unknown_agent(client):
 def test_groups_and_group_messages_view(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
-    client.post(
-        "/api/v1/groups",
-        headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
     )
-    send(client, a["secret_key"], "group", "research-team", "hai grup")
+    send(
+        client, a["secret_key"], "group", "research-team", "hai grup",
+        target_id=group["group_id"],
+    )
 
     login(client)
     groups = client.get(f"{API}/groups").json()["data"]["groups"]
     assert len(groups) == 1
+    assert groups[0]["group_id"] == group["group_id"]
     assert sorted(groups[0]["members"]) == ["hermes-a", "hermes-b"]
 
     msgs = client.get(f"{API}/groups/research-team/messages").json()["data"]
@@ -199,7 +199,8 @@ def test_files_list_download_delete(client, tmp_path):
             files={"file": ("laporan.pdf", f, "application/pdf")},
             data={
                 "target_type": "direct",
-                "target": "hermes-b",
+                "target_id": b["agent_id"],
+                "target_name": "hermes-b",
                 "client_msg_id": str(uuid.uuid4()),
             },
         )
@@ -261,7 +262,8 @@ def test_file_view_requires_session(client):
             files={"file": ("x.bin", f, "application/octet-stream")},
             data={
                 "target_type": "direct",
-                "target": "hermes-b",
+                "target_id": b["agent_id"],
+                "target_name": "hermes-b",
                 "client_msg_id": str(uuid.uuid4()),
             },
         )
@@ -272,11 +274,7 @@ def test_file_view_requires_session(client):
 def test_file_message_metadata_in_chat_views(client, tmp_path):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
-    client.post(
-        "/api/v1/groups",
-        headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -291,7 +289,8 @@ def test_file_message_metadata_in_chat_views(client, tmp_path):
             files={"file": ("dataset.csv", f, "text/csv")},
             data={
                 "target_type": "group",
-                "target": "research-team",
+                "target_id": group["group_id"],
+                "target_name": "research-team",
                 "client_msg_id": str(uuid.uuid4()),
                 "caption": "Dataset scraping",
             },
@@ -320,7 +319,8 @@ def test_dashboard_send_direct(client):
         json={
             "as_agent": "hermes-a",
             "target_type": "direct",
-            "target": "hermes-b",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-b",
             "content": "Halo dari dashboard",
         },
     )
@@ -336,14 +336,15 @@ def test_dashboard_send_direct(client):
 
 
 def test_dashboard_send_direct_self_rejected(client):
-    register_agent(client, "hermes-a")
+    a = register_agent(client, "hermes-a")
     login(client)
     r = client.post(
         f"{API}/send-message",
         json={
             "as_agent": "hermes-a",
             "target_type": "direct",
-            "target": "hermes-a",
+            "target_id": a["agent_id"],
+            "target_name": "hermes-a",
             "content": "ke diri sendiri",
         },
     )
@@ -352,14 +353,15 @@ def test_dashboard_send_direct_self_rejected(client):
 
 
 def test_dashboard_send_unknown_agent(client):
-    register_agent(client, "hermes-a")
+    a = register_agent(client, "hermes-a")
     login(client)
     r = client.post(
         f"{API}/send-message",
         json={
             "as_agent": "hermes-hantu",
             "target_type": "direct",
-            "target": "hermes-a",
+            "target_id": a["agent_id"],
+            "target_name": "hermes-a",
             "content": "x",
         },
     )
@@ -369,7 +371,8 @@ def test_dashboard_send_unknown_agent(client):
         json={
             "as_agent": "hermes-a",
             "target_type": "direct",
-            "target": "hermes-hantu",
+            "target_id": "ag_0000000000",
+            "target_name": "hermes-hantu",
             "content": "x",
         },
     )
@@ -379,18 +382,15 @@ def test_dashboard_send_unknown_agent(client):
 def test_dashboard_send_group_non_member(client):
     a = register_agent(client, "hermes-a")
     outsider = register_agent(client, "hermes-x")
-    client.post(
-        "/api/v1/groups",
-        headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     login(client)
     r = client.post(
         f"{API}/send-message",
         json={
             "as_agent": "hermes-x",
             "target_type": "group",
-            "target": "research-team",
+            "target_id": group["group_id"],
+            "target_name": "research-team",
             "content": "intrusi",
         },
     )
@@ -406,7 +406,8 @@ def test_dashboard_send_requires_session(client):
         json={
             "as_agent": "hermes-a",
             "target_type": "direct",
-            "target": "hermes-b",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-b",
             "content": "tanpa sesi",
         },
     )
@@ -425,10 +426,13 @@ def test_dashboard_group_full_flow(client):
     )
     assert r.status_code == 201
     assert r.json()["data"]["creator"] == "hermes-a"
+    dash_group_id = r.json()["data"]["group_id"]
+    assert dash_group_id.startswith("gr_")
 
     # Pembuat otomatis anggota; cek lewat daftar grup.
     groups = client.get(f"{API}/groups").json()["data"]["groups"]
     assert groups[0]["members"] == ["hermes-a"]
+    assert groups[0]["group_id"] == dash_group_id
 
     # B gabung lewat dashboard.
     r = client.post(f"{API}/groups/tim-dash/join", json={"as_agent": "hermes-b"})
@@ -445,7 +449,8 @@ def test_dashboard_group_full_flow(client):
         json={
             "as_agent": "hermes-a",
             "target_type": "group",
-            "target": "tim-dash",
+            "target_id": dash_group_id,
+            "target_name": "tim-dash",
             "content": "Update dari dashboard",
         },
     )

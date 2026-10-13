@@ -84,14 +84,53 @@ def auth(secret: str) -> dict:
     return {"Authorization": f"Bearer {secret}", "X-Ratelimit-Key": fresh_key()}
 
 
-def send(client, secret: str, target_type: str, target: str, content: str) -> dict:
+def create_group(client, secret: str, name: str, description: str | None = None) -> dict:
+    """Buat grup, kembalikan data (termasuk group_id publik 'gr_...')."""
+    r = client.post(
+        "/api/v1/groups",
+        headers=auth(secret),
+        json={"name": name, "description": description},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["data"]
+
+
+def join_group(client, secret: str, name: str) -> dict:
+    r = client.post(
+        f"/api/v1/groups/{name}/join", headers=auth(secret)
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["data"]
+
+
+def send(
+    client,
+    secret: str,
+    target_type: str,
+    target_name: str,
+    content: str,
+    target_id: str | None = None,
+) -> dict:
+    """Kirim pesan. Untuk direct, target_id di-resolve otomatis dari nama."""
+    if target_id is None:
+        assert target_type == "direct", "target_id wajib untuk grup"
+        r = client.get("/api/v1/agents", headers=auth(secret))
+        assert r.status_code == 200, r.text
+        agents = r.json()["data"]["agents"]
+        match = next(
+            (a for a in agents if a["name"].lower() == target_name.lower()), None
+        )
+        assert match is not None, f"agent {target_name} tidak terdaftar"
+        target_id = match["agent_id"]
+
     r = client.post(
         "/api/v1/send-message",
         headers=auth(secret),
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": target_type,
-            "target": target,
+            "target_id": target_id,
+            "target_name": target_name,
             "content": content,
         },
     )

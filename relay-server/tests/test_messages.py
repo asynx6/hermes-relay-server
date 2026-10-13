@@ -2,7 +2,7 @@
 import sqlite3
 import uuid
 
-from conftest import fetch, register_agent, send
+from conftest import create_group, fetch, register_agent, send
 
 
 def test_direct_message_delivered_to_recipient_only(client):
@@ -38,7 +38,8 @@ def test_send_to_unknown_agent(client):
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
-            "target": "hermes-ghost",
+            "target_id": "ag_0000000000",
+            "target_name": "hermes-ghost",
             "content": "boo",
         },
     )
@@ -54,7 +55,8 @@ def test_send_to_self_rejected(client):
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
-            "target": "hermes-a",
+            "target_id": a["agent_id"],
+            "target_name": "hermes-a",
             "content": "me",
         },
     )
@@ -74,7 +76,8 @@ def test_idempotent_retry_same_client_msg_id(client):
         json={
             "client_msg_id": client_msg_id,
             "target_type": "direct",
-            "target": "hermes-b",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-b",
             "content": "sama",
         },
     )
@@ -87,7 +90,8 @@ def test_idempotent_retry_same_client_msg_id(client):
         json={
             "client_msg_id": client_msg_id,
             "target_type": "direct",
-            "target": "hermes-b",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-b",
             "content": "sama",
         },
     )
@@ -115,7 +119,7 @@ def test_content_length_and_uuid_validation(client):
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={"client_msg_id": "bukan-uuid", "target_type": "direct",
-              "target": "hermes-b", "content": "x"},
+              "target_id": b["agent_id"], "target_name": "hermes-b", "content": "x"},
     )
     assert r.status_code == 422
     assert r.json()["code"] == "VALIDATION_ERROR"
@@ -123,21 +127,22 @@ def test_content_length_and_uuid_validation(client):
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={"client_msg_id": str(uuid.uuid4()), "target_type": "direct",
-              "target": "hermes-b", "content": ""},
+              "target_id": b["agent_id"], "target_name": "hermes-b", "content": ""},
     )
     assert r.status_code == 422
 
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={"client_msg_id": str(uuid.uuid4()), "target_type": "direct",
-              "target": "hermes-b", "content": "x" * 8001},
+              "target_id": b["agent_id"], "target_name": "hermes-b",
+              "content": "x" * 8001},
     )
     assert r.status_code == 422
 
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={"client_msg_id": str(uuid.uuid4()), "target_type": "channel",
-              "target": "hermes-b", "content": "x"},
+              "target_id": b["agent_id"], "target_name": "hermes-b", "content": "x"},
     )
     assert r.status_code == 422
 
@@ -148,12 +153,8 @@ def test_group_message_reaches_all_members_not_sender(client):
     c = register_agent(client, "hermes-c")
     d = register_agent(client, "hermes-d")
 
-    r = client.post(
-        "/api/v1/groups", headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team", "description": "Grup riset"},
-    )
-    assert r.status_code == 201
-    assert r.json()["data"]["name"] == "research-team"
+    group = create_group(client, a["secret_key"], "research-team", "Grup riset")
+    assert group["group_id"].startswith("gr_")
 
     for agent in (b, c):
         r = client.post(
@@ -162,13 +163,17 @@ def test_group_message_reaches_all_members_not_sender(client):
         )
         assert r.status_code == 200
 
-    send(client, a["secret_key"], "group", "research-team", "Update: dataset siap")
+    send(
+        client, a["secret_key"], "group", "research-team",
+        "Update: dataset siap", target_id=group["group_id"],
+    )
 
     for agent in (b, c):
         msgs = fetch(client, agent["secret_key"])["messages"]
         assert len(msgs) == 1
         assert msgs[0]["scope"] == "group"
         assert msgs[0]["group"] == "research-team"
+        assert msgs[0]["group_id"] == group["group_id"]
         assert msgs[0]["content"] == "Update: dataset siap"
 
     # Non-member tidak melihat pesan grup.
@@ -180,17 +185,15 @@ def test_group_message_reaches_all_members_not_sender(client):
 def test_non_member_cannot_send_to_group(client):
     a = register_agent(client, "hermes-a")
     outsider = register_agent(client, "hermes-x")
-    client.post(
-        "/api/v1/groups", headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     r = client.post(
         "/api/v1/send-message",
         headers={"Authorization": f"Bearer {outsider['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "group",
-            "target": "research-team",
+            "target_id": group["group_id"],
+            "target_name": "research-team",
             "content": "intrusi",
         },
     )
@@ -198,26 +201,77 @@ def test_non_member_cannot_send_to_group(client):
     assert r.json()["code"] == "FORBIDDEN"
 
 
+def test_send_with_mismatched_id_and_name(client):
+    """ID dan nama harus cocok — kalau tidak, 404 (bukan kirim ke siapanya."""
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    c = register_agent(client, "hermes-c")
+    h = {"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"}
+
+    # ID agent B tapi nama agent C.
+    r = client.post(
+        "/api/v1/send-message", headers=h,
+        json={
+            "client_msg_id": str(uuid.uuid4()),
+            "target_type": "direct",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-c",
+            "content": "salah alamat",
+        },
+    )
+    assert r.status_code == 404
+    assert r.json()["code"] == "NOT_FOUND"
+
+    # ID valid, nama asing.
+    r = client.post(
+        "/api/v1/send-message", headers=h,
+        json={
+            "client_msg_id": str(uuid.uuid4()),
+            "target_type": "direct",
+            "target_id": b["agent_id"],
+            "target_name": "hermes-asing",
+            "content": "salah alamat",
+        },
+    )
+    assert r.status_code == 404
+
+    # ID dengan format salah.
+    r = client.post(
+        "/api/v1/send-message", headers=h,
+        json={
+            "client_msg_id": str(uuid.uuid4()),
+            "target_type": "direct",
+            "target_id": "ag_salah",
+            "target_name": "hermes-b",
+            "content": "salah alamat",
+        },
+    )
+    assert r.status_code == 422
+
+
 def test_new_member_only_sees_messages_after_joining(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     c = register_agent(client, "hermes-c")
 
-    client.post(
-        "/api/v1/groups", headers={"Authorization": f"Bearer {a['secret_key']}"},
-        json={"name": "research-team"},
-    )
+    group = create_group(client, a["secret_key"], "research-team")
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
     )
-    send(client, a["secret_key"], "group", "research-team", "pesan-1")
+    send(
+        client, a["secret_key"], "group", "research-team", "pesan-1",
+        target_id=group["group_id"],
+    )
     # C join setelah pesan-1 terkirim.
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {c['secret_key']}"},
     )
-    send(client, a["secret_key"], "group", "research-team", "pesan-2")
+    send(
+        client, a["secret_key"], "group", "research-team", "pesan-2",
+        target_id=group["group_id"],
+    )
 
     b_msgs = [m["content"] for m in fetch(client, b["secret_key"])["messages"]]
     c_msgs = [m["content"] for m in fetch(client, c["secret_key"])["messages"]]
@@ -321,7 +375,8 @@ def test_reply_to(client):
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
-            "target": "hermes-a",
+            "target_id": a["agent_id"],
+            "target_name": "hermes-a",
             "content": "jawaban",
             "reply_to": first["message_id"],
         },
@@ -338,7 +393,8 @@ def test_reply_to(client):
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
-            "target": "hermes-a",
+            "target_id": a["agent_id"],
+            "target_name": "hermes-a",
             "content": "halo",
             "reply_to": 99999,
         },

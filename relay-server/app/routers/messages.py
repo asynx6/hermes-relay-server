@@ -42,12 +42,16 @@ def send_message(body: SendMessageRequest, request: Request, agent=Depends(get_c
             )
 
         if body.target_type == "direct":
-            if body.target.strip().lower() == agent["name"].lower():
+            if body.target_name.strip().lower() == agent["name"].lower():
                 raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim pesan ke diri sendiri.")
-            recipient = message_service.resolve_direct_target(conn, body.target)
+            recipient = message_service.resolve_direct_target(
+                conn, body.target_id, body.target_name
+            )
             recipient_id, group_id = recipient["id"], None
         else:
-            group = message_service.resolve_group_target(conn, body.target)
+            group = message_service.resolve_group_target(
+                conn, body.target_id, body.target_name
+            )
             message_service.ensure_group_member(conn, group["id"], agent["id"])
             recipient_id, group_id = None, group["id"]
 
@@ -75,7 +79,8 @@ def send_message(body: SendMessageRequest, request: Request, agent=Depends(get_c
             "data": {
                 "message_id": message_id,
                 "target_type": body.target_type,
-                "target": body.target,
+                "target": body.target_name,
+                "target_id": body.target_id,
                 "created_at": created_at,
                 "duplicate": False,
             },

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     direction         TEXT    NOT NULL CHECK (direction IN ('in', 'out')),
     scope             TEXT    NOT NULL CHECK (scope IN ('direct', 'group')),
     peer              TEXT    NOT NULL,
+    peer_id           TEXT,
     sender            TEXT    NOT NULL,
     msg_type          TEXT    NOT NULL DEFAULT 'text',
     content           TEXT,
@@ -130,18 +131,18 @@ class Memory:
     # ---- outbox ----
 
     def save_outgoing(
-        self, scope: str, peer: str, content: str, client_msg_id: str,
-        msg_type: str = "text", file_id: str | None = None,
+        self, scope: str, peer: str, peer_id: str, content: str,
+        client_msg_id: str, msg_type: str = "text", file_id: str | None = None,
     ) -> int:
         """Catat pesan keluar sebagai pending (siap dikirim di siklus berikutnya)."""
         cur = self.conn.execute(
             """INSERT INTO conversations
-                 (client_msg_id, direction, scope, peer, sender, msg_type,
+                 (client_msg_id, direction, scope, peer, peer_id, sender, msg_type,
                   content, file_id, status, created_at)
-               VALUES (?, 'out', ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+               VALUES (?, 'out', ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
             (
-                client_msg_id, scope, peer, self.agent_name, msg_type, content,
-                file_id, now_iso(),
+                client_msg_id, scope, peer, peer_id, self.agent_name, msg_type,
+                content, file_id, now_iso(),
             ),
         )
         self.conn.commit()

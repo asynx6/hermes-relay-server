@@ -1,9 +1,19 @@
-"""Logika pesan: idempotency, resolusi target, query fetch, keanggotaan grup."""
+"""Logika pesan: idempotency, resolusi target, query fetch, keanggotaan grup.
+
+Alamat pesan selalu pasangan (ID, nama): pengirim mengirim target_id +
+target_name, dan server hanya menerima pesan kalau baris dengan ID tersebut
+benar-benar bernama sesuai. Ini mencegah pesan salah kirim akibat nama yang
+berubah atau bentrok.
+"""
 import secrets
 import sqlite3
 
-from ..config import settings
 from ..security import api_error
+
+ID_PATTERN_HINT = (
+    "target_id harus seperti 'ag_xxx' (agent) atau 'gr_xxx' (grup) — "
+    "lihat GET /agents atau GET /groups."
+)
 
 
 def new_agent_id(conn: sqlite3.Connection) -> str:
@@ -16,22 +26,44 @@ def new_agent_id(conn: sqlite3.Connection) -> str:
             return candidate
 
 
-def resolve_direct_target(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
+def new_group_id(conn: sqlite3.Connection) -> str:
+    while True:
+        candidate = "gr_" + secrets.token_hex(5)
+        exists = conn.execute(
+            "SELECT 1 FROM groups WHERE group_id = ?", (candidate,)
+        ).fetchone()
+        if not exists:
+            return candidate
+
+
+def resolve_direct_target(
+    conn: sqlite3.Connection, target_id: str, target_name: str
+) -> sqlite3.Row:
+    """Cari agent aktif yang cocok dengan ID *dan* nama sekaligus."""
     row = conn.execute(
-        "SELECT * FROM agents WHERE name = ? COLLATE NOCASE AND status = 'active'",
-        (name,),
+        "SELECT * FROM agents WHERE agent_id = ? AND name = ? COLLATE NOCASE "
+        "AND status = 'active'",
+        (target_id, target_name),
     ).fetchone()
     if row is None:
-        raise api_error(404, "NOT_FOUND", f"Agent '{name}' tidak ditemukan.")
+        raise api_error(
+            404, "NOT_FOUND", "Agent tidak ditemukan, atau ID dan nama tidak cocok."
+        )
     return row
 
 
-def resolve_group_target(conn: sqlite3.Connection, name: str) -> sqlite3.Row:
+def resolve_group_target(
+    conn: sqlite3.Connection, target_id: str, target_name: str
+) -> sqlite3.Row:
+    """Cari grup yang cocok dengan ID *dan* nama sekaligus."""
     row = conn.execute(
-        "SELECT * FROM groups WHERE name = ? COLLATE NOCASE", (name,)
+        "SELECT * FROM groups WHERE group_id = ? AND name = ? COLLATE NOCASE",
+        (target_id, target_name),
     ).fetchone()
     if row is None:
-        raise api_error(404, "NOT_FOUND", f"Grup '{name}' tidak ditemukan.")
+        raise api_error(
+            404, "NOT_FOUND", "Grup tidak ditemukan, atau ID dan nama tidak cocok."
+        )
     return row
 
 
@@ -109,7 +141,8 @@ def fetch_messages(
     """
     rows = conn.execute(
         """SELECT m.id, m.msg_type, m.content, m.file_id, m.created_at,
-                  m.reply_to, s.name AS sender_name, g.name AS group_name,
+                  m.reply_to, s.name AS sender_name, s.agent_id AS sender_agent_id,
+                  g.name AS group_name, g.group_id AS group_public_id,
                   fl.original_name, fl.size_bytes, fl.mime_type, fl.sha256
            FROM messages m
            JOIN agents s ON s.id = m.sender_id
@@ -149,7 +182,9 @@ def fetch_messages(
                 "id": r["id"],
                 "scope": "group" if r["group_name"] else "direct",
                 "from": r["sender_name"],
+                "from_id": r["sender_agent_id"],
                 "group": r["group_name"],
+                "group_id": r["group_public_id"],
                 "msg_type": r["msg_type"],
                 "content": r["content"],
                 "file": file_info,

@@ -78,8 +78,10 @@ class RelayAPI:
 
     # ---- pesan ----
 
-    def send_message(self, target_type: str, target: str, content: str,
-                     client_msg_id: str, reply_to: int | None = None) -> dict:
+    def send_message(self, target_type: str, target_id: str, target_name: str,
+                     content: str, client_msg_id: str,
+                     reply_to: int | None = None) -> dict:
+        """Kirim pesan. Target selalu pasangan (target_id, target_name)."""
         resp = request_with_retry(
             self.session,
             "POST",
@@ -89,7 +91,8 @@ class RelayAPI:
             json={
                 "client_msg_id": client_msg_id,
                 "target_type": target_type,
-                "target": target,
+                "target_id": target_id,
+                "target_name": target_name,
                 "content": content,
                 "reply_to": reply_to,
             },
@@ -112,9 +115,11 @@ class RelayAPI:
 
     # ---- file ----
 
-    def upload_file(self, path: str, target_type: str, target: str,
-                    client_msg_id: str, caption: str | None = None) -> dict:
-        """Upload dengan pembukaan ulang file di tiap percobaan."""
+    def upload_file(self, path: str, target_type: str, target_id: str,
+                    target_name: str, client_msg_id: str,
+                    caption: str | None = None) -> dict:
+        """Upload dengan pembukaan ulang file di tiap percobaan.
+        Target selalu pasangan (target_id, target_name)."""
         size = os.path.getsize(path)
         if size > self.config.max_upload_mb * 1024 * 1024:
             raise ValueError(
@@ -129,7 +134,8 @@ class RelayAPI:
                         files={"file": (os.path.basename(path), f)},
                         data={
                             "target_type": target_type,
-                            "target": target,
+                            "target_id": target_id,
+                            "target_name": target_name,
                             "client_msg_id": client_msg_id,
                             "caption": caption or "",
                         },

@@ -31,10 +31,35 @@ class Poller:
         """Kirim ulang pesan pending. Gagal sementara -> retry_count naik;
         lewat batas -> failed permanen."""
         for row in self.memory.pending_outbox():
+            peer_id = row["peer_id"]
+            if peer_id is None:
+                # Baris lama (sebelum addressing ID+nama): resolve ulang lewat direktori.
+                try:
+                    if row["scope"] == "group":
+                        match = next(
+                            (g for g in self.api.list_groups()
+                             if g["name"].lower() == row["peer"].lower()),
+                            None,
+                        )
+                    else:
+                        match = next(
+                            (a for a in self.api.list_agents()
+                             if a["name"].lower() == row["peer"].lower()),
+                            None,
+                        )
+                except Exception:
+                    self.memory.mark_failed(row["id"])
+                    continue
+                if match is None:
+                    self.memory.mark_failed(row["id"])
+                    continue
+                peer_id = match.get("group_id") or match.get("agent_id")
+
             try:
                 data = self.api.send_message(
                     target_type="group" if row["scope"] == "group" else "direct",
-                    target=row["peer"],
+                    target_id=peer_id,
+                    target_name=row["peer"],
                     content=row["content"] or "",
                     client_msg_id=row["client_msg_id"],
                 )

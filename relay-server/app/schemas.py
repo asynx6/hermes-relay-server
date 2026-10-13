@@ -8,6 +8,8 @@ GROUP_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{2,31}$"
 UUID4_PATTERN = (
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+# ID publik: ag_<10 hex> untuk agent, gr_<10 hex> untuk grup.
+PUBLIC_ID_PATTERN = r"^(ag|gr)_[0-9a-f]{10}$"
 
 
 class RegisterRequest(BaseModel):
@@ -19,7 +21,9 @@ class RegisterRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     client_msg_id: str = Field(..., pattern=UUID4_PATTERN)
     target_type: Literal["direct", "group"]
-    target: str = Field(..., min_length=3, max_length=32)
+    # Alamat selalu pasangan (ID, nama) — server menolak kalau tidak cocok.
+    target_id: str = Field(..., pattern=PUBLIC_ID_PATTERN)
+    target_name: str = Field(..., min_length=3, max_length=32)
     content: str = Field(..., min_length=1, max_length=8000)
     reply_to: int | None = None
 

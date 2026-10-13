@@ -251,12 +251,16 @@ def send_message(body: SendMessageRequest, request: Request, _=session_dep):
         sender = _resolve_agent_row(conn, body.as_agent)
 
         if body.target_type == "direct":
-            if body.target.strip().lower() == sender["name"].lower():
+            if body.target_name.strip().lower() == sender["name"].lower():
                 raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim ke diri sendiri.")
-            target = message_service.resolve_direct_target(conn, body.target)
+            target = message_service.resolve_direct_target(
+                conn, body.target_id, body.target_name
+            )
             recipient_id, group_id = target["id"], None
         else:
-            group = message_service.resolve_group_target(conn, body.target)
+            group = message_service.resolve_group_target(
+                conn, body.target_id, body.target_name
+            )
             message_service.ensure_group_member(conn, group["id"], sender["id"])
             recipient_id, group_id = None, group["id"]
 
@@ -282,7 +286,8 @@ def send_message(body: SendMessageRequest, request: Request, _=session_dep):
                 "message_id": message_id,
                 "from": body.as_agent,
                 "target_type": body.target_type,
-                "target": body.target,
+                "target": body.target_name,
+                "target_id": body.target_id,
                 "created_at": created_at,
             },
         },
@@ -300,14 +305,15 @@ def create_group(body: CreateGroupRequest, request: Request, _=session_dep):
         if clash:
             raise api_error(409, "CONFLICT", f"Nama grup '{body.name}' sudah dipakai.")
         creator = _resolve_agent_row(conn, body.as_agent)
+        public_id = message_service.new_group_id(conn)
         cur = conn.execute(
-            "INSERT INTO groups (name, description, created_by) VALUES (?, ?, ?)",
-            (body.name, body.description, creator["id"]),
+            "INSERT INTO groups (group_id, name, description, created_by) VALUES (?, ?, ?, ?)",
+            (public_id, body.name, body.description, creator["id"]),
         )
-        group_id = cur.lastrowid
+        row_id = cur.lastrowid
         conn.execute(
             "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
-            (group_id, creator["id"]),
+            (row_id, creator["id"]),
         )
         conn.commit()
     finally:
@@ -317,7 +323,7 @@ def create_group(body: CreateGroupRequest, request: Request, _=session_dep):
         content={
             "status": "ok",
             "data": {
-                "group_id": group_id,
+                "group_id": public_id,
                 "name": body.name,
                 "creator": body.as_agent,
             },
@@ -362,7 +368,7 @@ def list_groups(request: Request, _=session_dep):
     conn = connect()
     try:
         groups = conn.execute(
-            """SELECT g.name, g.description, g.created_at,
+            """SELECT g.group_id, g.name, g.description, g.created_at,
                       (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) AS members
                FROM groups g ORDER BY g.created_at"""
         ).fetchall()
@@ -383,6 +389,7 @@ def list_groups(request: Request, _=session_dep):
         "data": {
             "groups": [
                 {
+                    "group_id": g["group_id"],
                     "name": g["name"],
                     "description": g["description"],
                     "created_at": g["created_at"],

@@ -47,6 +47,7 @@ class AgentHarness:
         self.memory = Memory(str(self.dir / "data" / "agent_memory.db"), agent_name=name)
         self.file_handler = FileHandler(self.config.download_dir)
         self.received: list[dict] = []
+        self._id_cache: dict[tuple[str, str], str] = {}
         self.poller = Poller(
             self.api,
             self.memory,
@@ -59,10 +60,41 @@ class AgentHarness:
     def poll(self) -> tuple[bool, bool]:
         return self.poller.poll_once()
 
+    def _resolve(self, target_type: str, name: str) -> str:
+        """Nama -> ID publik (ag_/gr_). Addressing selalu pasangan ID+nama.
+
+        Hasil di-cache: direktori tidak berubah selama satu tes, dan tes
+        beban mengirim >1000 pesan ke target yang sama-sama diulang.
+        """
+        key = (target_type, name.lower())
+        if key in self._id_cache:
+            return self._id_cache[key]
+        if target_type == "group":
+            match = next(
+                (g for g in self.api.list_groups() if g["name"].lower() == name.lower()),
+                None,
+            )
+            if match is None:
+                raise RuntimeError(f"Grup '{name}' tidak ditemukan.")
+            peer_id = match["group_id"]
+        else:
+            match = next(
+                (a for a in self.api.list_agents() if a["name"].lower() == name.lower()),
+                None,
+            )
+            if match is None:
+                raise RuntimeError(f"Agent '{name}' tidak terdaftar.")
+            peer_id = match["agent_id"]
+        self._id_cache[key] = peer_id
+        return peer_id
+
     def send(self, target_type: str, target: str, content: str) -> dict:
         client_msg_id = str(uuid.uuid4())
-        self.memory.save_outgoing(target_type, target, content, client_msg_id)
-        data = self.api.send_message(target_type, target, content, client_msg_id)
+        peer_id = self._resolve(target_type, target)
+        self.memory.save_outgoing(target_type, target, peer_id, content, client_msg_id)
+        data = self.api.send_message(
+            target_type, peer_id, target, content, client_msg_id
+        )
         row = self.memory.conn.execute(
             "SELECT id FROM conversations WHERE client_msg_id = ?", (client_msg_id,)
         ).fetchone()
@@ -71,8 +103,9 @@ class AgentHarness:
 
     def upload(self, path: Path, target_type: str, target: str,
                caption: str = "") -> dict:
+        peer_id = self._resolve(target_type, target)
         return self.api.upload_file(
-            str(path), target_type, target, str(uuid.uuid4()), caption
+            str(path), target_type, peer_id, target, str(uuid.uuid4()), caption
         )
 
     def poll_until(self, count: int, timeout: float = 15.0) -> bool:
@@ -280,7 +313,8 @@ def test_scenario_8b_dangerous_upload_name(live_server, agents_dir, tmp_path):
             files={"file": ("../../etc/passwd", f, "application/octet-stream")},
             data={
                 "target_type": "direct",
-                "target": "hermes-b",
+                "target_id": b._resolve("direct", "hermes-b"),
+                "target_name": "hermes-b",
                 "client_msg_id": str(uuid.uuid4()),
             },
         )
@@ -328,6 +362,8 @@ def test_scenario_9_auth_failures(live_server, agents_dir):
 def test_scenario_10_server_outage_recovery(live_server, agents_dir):
     a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
+    # Resolusi ID dilakukan selagi server masih hidup.
+    peer_id = b._resolve("direct", "hermes-a")
 
     # Server dimatikan saat agent polling.
     live_server.stop()
@@ -336,9 +372,11 @@ def test_scenario_10_server_outage_recovery(live_server, agents_dir):
 
     # Pesan keluar gagal terkirim: tetap di outbox, tidak hilang.
     client_msg_id = str(uuid.uuid4())
-    b.memory.save_outgoing("direct", "hermes-a", "pesan-saat-mati", client_msg_id)
+    b.memory.save_outgoing("direct", "hermes-a", peer_id, "pesan-saat-mati", client_msg_id)
     with pytest.raises(RelayUnavailable):
-        b.api.send_message("direct", "hermes-a", "pesan-saat-mati", client_msg_id)
+        b.api.send_message(
+            "direct", peer_id, "hermes-a", "pesan-saat-mati", client_msg_id
+        )
     pending = b.memory.pending_outbox()
     assert len(pending) == 1
     assert pending[0]["content"] == "pesan-saat-mati"
@@ -365,9 +403,10 @@ def test_scenario_11_idempotent_double_send(live_server, agents_dir):
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
 
     client_msg_id = str(uuid.uuid4())
-    first = a.api.send_message("direct", "hermes-b", "pesan sama", client_msg_id)
+    peer_id = a._resolve("direct", "hermes-b")
+    first = a.api.send_message("direct", peer_id, "hermes-b", "pesan sama", client_msg_id)
     assert first["duplicate"] is False
-    second = a.api.send_message("direct", "hermes-b", "pesan sama", client_msg_id)
+    second = a.api.send_message("direct", peer_id, "hermes-b", "pesan sama", client_msg_id)
     assert second["duplicate"] is True
     assert second["message_id"] == first["message_id"]
 

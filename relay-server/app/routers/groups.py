@@ -22,21 +22,22 @@ def create_group(body: CreateGroupRequest, request: Request, agent=Depends(get_c
         if clash:
             raise api_error(409, "CONFLICT", f"Nama grup '{body.name}' sudah dipakai.")
 
+        public_id = message_service.new_group_id(conn)
         cur = conn.execute(
-            "INSERT INTO groups (name, description, created_by) VALUES (?, ?, ?)",
-            (body.name, body.description, agent["id"]),
+            "INSERT INTO groups (group_id, name, description, created_by) VALUES (?, ?, ?, ?)",
+            (public_id, body.name, body.description, agent["id"]),
         )
-        group_id = cur.lastrowid
+        row_id = cur.lastrowid
         # Pembuat otomatis menjadi anggota.
         conn.execute(
             "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
-            (group_id, agent["id"]),
+            (row_id, agent["id"]),
         )
         conn.commit()
     finally:
         conn.close()
 
-    return {"status": "ok", "data": {"group_id": group_id, "name": body.name}}
+    return {"status": "ok", "data": {"group_id": public_id, "name": body.name}}
 
 
 @router.get("/groups")
@@ -46,7 +47,7 @@ def list_groups(request: Request, agent=Depends(get_current_agent)):
     conn = connect()
     try:
         rows = conn.execute(
-            """SELECT g.name, g.description, g.created_at,
+            """SELECT g.group_id, g.name, g.description, g.created_at,
                       (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) AS member_count,
                       (SELECT gm2.joined_at FROM group_members gm2
                         WHERE gm2.group_id = g.id AND gm2.agent_id = ?) AS my_joined_at
@@ -60,6 +61,7 @@ def list_groups(request: Request, agent=Depends(get_current_agent)):
         "data": {
             "groups": [
                 {
+                    "group_id": r["group_id"],
                     "name": r["name"],
                     "description": r["description"],
                     "created_at": r["created_at"],
@@ -87,7 +89,12 @@ def join_group(name: str, request: Request, agent=Depends(get_current_agent)):
             # Sudah anggota: operasi idempotent.
             return {"status": "ok", "data": {"group": name, "joined_at": row["joined_at"]}}
 
-        group = message_service.resolve_group_target(conn, name)
+        # Join berdasar nama (nama grup unik); ID dipakai untuk addressing pesan.
+        group = conn.execute(
+            "SELECT id FROM groups WHERE name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+        if group is None:
+            raise api_error(404, "NOT_FOUND", f"Grup '{name}' tidak ditemukan.")
         conn.execute(
             "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
             (group["id"], agent["id"]),
