@@ -6,6 +6,7 @@
 const API = "/api/v1/dashboard";
 const state = {
   view: "agents",
+  agents: [],
   selectedGroup: null,
   selectedPair: null,
   autoLogoutTimer: null,
@@ -47,6 +48,12 @@ function esc(text) {
   return div.innerHTML;
 }
 
+function fillSelect(el, values, selected) {
+  el.innerHTML = values
+    .map((v) => `<option value="${esc(v)}" ${v === selected ? "selected" : ""}>${esc(v)}</option>`)
+    .join("");
+}
+
 async function api(path, options = {}) {
   const resp = await fetch(API + path, {
     credentials: "same-origin",
@@ -62,6 +69,13 @@ async function api(path, options = {}) {
     throw new Error(body.message || `HTTP ${resp.status}`);
   }
   return body.data;
+}
+
+async function ensureAgents() {
+  if (state.agents.length) return state.agents.map((a) => a.name);
+  const { agents } = await api("/agents");
+  state.agents = agents;
+  return agents.map((a) => a.name);
 }
 
 /* ---------------- tema ---------------- */
@@ -145,7 +159,7 @@ $("theme-toggle").addEventListener("click", () => {
 
 /* ---------------- navigasi ---------------- */
 
-const VIEWS = ["agents", "groups", "direct", "files", "password"];
+const VIEWS = ["agents", "groups", "direct", "files", "help", "password"];
 
 function switchView(view) {
   state.view = view;
@@ -168,6 +182,7 @@ document.querySelectorAll(".nav-btn").forEach((b) =>
 async function loadAgents() {
   try {
     const { agents } = await api("/agents");
+    state.agents = agents;  // segar untuk dropdown pengirim
     const tbody = $("agents-body");
     if (!agents.length) {
       tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Belum ada agent terdaftar.</td></tr>`;
@@ -194,10 +209,11 @@ async function loadAgents() {
 
 async function loadGroups() {
   try {
-    const { groups } = await api("/groups");
+    const [names, { groups }] = await Promise.all([ensureAgents(), api("/groups")]);
+    fillSelect($("new-group-creator"), names, names[0]);
     const list = $("groups-list");
     if (!groups.length) {
-      list.innerHTML = `<div class="empty-state">Belum ada grup.</div>`;
+      list.innerHTML = `<div class="empty-state">Belum ada grup. Buat dengan tombol di atas.</div>`;
       return;
     }
     list.innerHTML = groups
@@ -212,11 +228,38 @@ async function loadGroups() {
     list.querySelectorAll(".side-item").forEach((el) =>
       el.addEventListener("click", () => openGroup(el.dataset.group))
     );
+    if (!groups.some((g) => g.name === state.selectedGroup)) {
+      state.selectedGroup = null;
+    }
     if (!state.selectedGroup) openGroup(groups[0].name);
   } catch (err) {
     toast(err.message, "err");
   }
 }
+
+$("new-group-btn").addEventListener("click", () =>
+  $("new-group-form").classList.toggle("hidden")
+);
+
+$("new-group-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/groups", {
+      method: "POST",
+      body: JSON.stringify({
+        as_agent: $("new-group-creator").value,
+        name: $("new-group-name").value.trim(),
+        description: $("new-group-desc").value.trim() || null,
+      }),
+    });
+    $("new-group-form").reset();
+    $("new-group-form").classList.add("hidden");
+    toast("Grup dibuat.", "ok");
+    await loadGroups();
+  } catch (err) {
+    toast(err.message, "err");
+  }
+});
 
 async function openGroup(name) {
   state.selectedGroup = name;
@@ -226,21 +269,86 @@ async function openGroup(name) {
   $("group-chat-head").textContent = `Grup: ${name}`;
   $("group-messages").innerHTML = `<div class="empty-state">Memuat...</div>`;
   try {
-    const { messages } = await api(`/groups/${encodeURIComponent(name)}/messages`);
+    const { messages, members } = await loadGroupThread(name);
     renderMessages($("group-messages"), messages, { group: true });
+
+    const names = state.agents.map((a) => a.name);
+    state.groupMembers = members;
+    const current = $("group-as-agent").value;
+    fillSelect($("group-as-agent"), members, members.includes(current) ? current : members[0]);
+    $("group-composer").classList.remove("hidden");
+    updateGroupJoinButton();
   } catch (err) {
     $("group-messages").innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+    $("group-composer").classList.add("hidden");
   }
 }
+
+async function loadGroupThread(name) {
+  const data = await api(`/groups/${encodeURIComponent(name)}/messages`);
+  // Daftar anggota diambil dari endpoint /groups (biar UI tahu siapa yang boleh kirim).
+  const { groups } = await api("/groups");
+  const g = groups.find((x) => x.name === name);
+  return { messages: data.messages, members: g ? g.members : [] };
+}
+
+function updateGroupJoinButton() {
+  const me = $("group-as-agent").value;
+  const isMember = (state.groupMembers || []).includes(me);
+  $("group-join-btn").classList.toggle("hidden", isMember);
+}
+
+$("group-as-agent").addEventListener("change", updateGroupJoinButton);
+
+$("group-join-btn").addEventListener("click", async () => {
+  try {
+    await api(`/groups/${encodeURIComponent(state.selectedGroup)}/join`, {
+      method: "POST",
+      body: JSON.stringify({ as_agent: $("group-as-agent").value }),
+    });
+    toast(`${$("group-as-agent").value} bergabung ke grup.`, "ok");
+    await openGroup(state.selectedGroup);
+    await loadGroups();
+  } catch (err) {
+    toast(err.message, "err");
+  }
+});
+
+$("group-composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("group-input");
+  const content = input.value.trim();
+  if (!content) return;
+  try {
+    await api("/send-message", {
+      method: "POST",
+      body: JSON.stringify({
+        as_agent: $("group-as-agent").value,
+        target_type: "group",
+        target: state.selectedGroup,
+        content,
+      }),
+    });
+    input.value = "";
+    await openGroup(state.selectedGroup);
+    await loadGroups();
+  } catch (err) {
+    toast(err.message, "err");
+  }
+});
 
 /* ---------------- privat ---------------- */
 
 async function loadPairs() {
   try {
+    const names = await ensureAgents();
+    fillSelect($("new-direct-from"), names, names[0]);
+    fillSelect($("new-direct-to"), names, names[1] || names[0]);
+
     const { conversations } = await api("/conversations");
     const list = $("pairs-list");
     if (!conversations.length) {
-      list.innerHTML = `<div class="empty-state">Belum ada chat privat.</div>`;
+      list.innerHTML = `<div class="empty-state">Belum ada chat privat. Buat dengan tombol di atas.</div>`;
       return;
     }
     list.innerHTML = conversations
@@ -262,6 +370,22 @@ async function loadPairs() {
   }
 }
 
+$("new-direct-btn").addEventListener("click", () =>
+  $("new-direct-form").classList.toggle("hidden")
+);
+
+$("new-direct-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const from = $("new-direct-from").value;
+  const to = $("new-direct-to").value;
+  if (from === to) {
+    toast("Pilih dua agent yang berbeda.", "err");
+    return;
+  }
+  $("new-direct-form").classList.add("hidden");
+  openPair([from, to]);
+});
+
 async function openPair(agents) {
   state.selectedPair = agents.join("|");
   document.querySelectorAll("#pairs-list .side-item").forEach((el) =>
@@ -274,9 +398,61 @@ async function openPair(agents) {
       `/conversations/${encodeURIComponent(agents[0])}/${encodeURIComponent(agents[1])}`
     );
     renderMessages($("direct-messages"), messages, {});
+    const current = $("direct-as-agent").value;
+    fillSelect(
+      $("direct-as-agent"),
+      agents,
+      agents.includes(current) ? current : agents[0]
+    );
+    $("direct-composer").classList.remove("hidden");
   } catch (err) {
     $("direct-messages").innerHTML = `<div class="empty-state">${esc(err.message)}</div>`;
+    $("direct-composer").classList.add("hidden");
   }
+}
+
+$("direct-composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("direct-input");
+  const content = input.value.trim();
+  if (!content) return;
+  const from = $("direct-as-agent").value;
+  const to = state.selectedPair.split("|").find((a) => a !== from);
+  try {
+    await api("/send-message", {
+      method: "POST",
+      body: JSON.stringify({
+        as_agent: from,
+        target_type: "direct",
+        target: to,
+        content,
+      }),
+    });
+    input.value = "";
+    await openPair(state.selectedPair.split("|"));
+    // Segarkan daftar pasangan (preview dan urutan bisa berubah).
+    const { conversations } = await api("/conversations");
+    renderPairsList(conversations);
+  } catch (err) {
+    toast(err.message, "err");
+  }
+});
+
+function renderPairsList(conversations) {
+  const list = $("pairs-list");
+  list.innerHTML = conversations
+    .map((c) => {
+      const key = c.agents.join("|");
+      return `<div class="side-item ${key === state.selectedPair ? "active" : ""}"
+                   data-pair="${esc(key)}">
+        <div class="title">${esc(c.agents[0])} ⇄ ${esc(c.agents[1])}</div>
+        <div class="sub">${c.message_count} pesan · ${esc(c.last_preview.slice(0, 40))}</div>
+      </div>`;
+    })
+    .join("");
+  list.querySelectorAll(".side-item").forEach((el) =>
+    el.addEventListener("click", () => openPair(el.dataset.pair.split("|")))
+  );
 }
 
 function renderMessages(container, messages, { group }) {

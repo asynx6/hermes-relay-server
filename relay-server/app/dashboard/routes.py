@@ -5,6 +5,7 @@ kecuali `/login` dan `/logout`. Tidak ada CORS: dashboard hanya untuk browser
 yang mengakses server langsung.
 """
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,9 +15,15 @@ from ..config import settings
 from ..database import connect
 from ..ratelimit import limiter
 from ..security import api_error
-from ..services import file_service
+from ..services import file_service, message_service
 from . import auth
-from .schemas import ChangePasswordRequest, LoginRequest
+from .schemas import (
+    ChangePasswordRequest,
+    CreateGroupRequest,
+    JoinGroupRequest,
+    LoginRequest,
+    SendMessageRequest,
+)
 
 router = APIRouter()
 
@@ -223,6 +230,131 @@ def conversation_thread(agent_a: str, agent_b: str, request: Request, _=session_
 # ---------------------------------------------------------------------------
 # Chat grup
 # ---------------------------------------------------------------------------
+
+def _resolve_agent_row(conn, name: str):
+    row = conn.execute(
+        "SELECT * FROM agents WHERE name = ? COLLATE NOCASE AND status = 'active'",
+        (name,),
+    ).fetchone()
+    if row is None:
+        raise api_error(404, "NOT_FOUND", f"Agent '{name}' tidak ditemukan.")
+    return row
+
+
+@router.post("/send-message")
+@limiter.limit(lambda: settings.rate_limit_default)
+def send_message(body: SendMessageRequest, request: Request, _=session_dep):
+    """Kirim pesan sebagai agent pilihan admin (lihat catatan di schemas)."""
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        sender = _resolve_agent_row(conn, body.as_agent)
+
+        if body.target_type == "direct":
+            if body.target.strip().lower() == sender["name"].lower():
+                raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim ke diri sendiri.")
+            target = message_service.resolve_direct_target(conn, body.target)
+            recipient_id, group_id = target["id"], None
+        else:
+            group = message_service.resolve_group_target(conn, body.target)
+            message_service.ensure_group_member(conn, group["id"], sender["id"])
+            recipient_id, group_id = None, group["id"]
+
+        row = message_service.store_message(
+            conn,
+            sender_row_id=sender["id"],
+            client_msg_id=str(uuid.uuid4()),
+            recipient_row_id=recipient_id,
+            group_id=group_id,
+            content=body.content,
+            reply_to=None,
+        )
+        conn.commit()
+        message_id, created_at = row["id"], row["created_at"]
+    finally:
+        conn.close()
+
+    return JSONResponse(
+        status_code=201,
+        content={
+            "status": "ok",
+            "data": {
+                "message_id": message_id,
+                "from": body.as_agent,
+                "target_type": body.target_type,
+                "target": body.target,
+                "created_at": created_at,
+            },
+        },
+    )
+
+
+@router.post("/groups")
+@limiter.limit(lambda: settings.rate_limit_default)
+def create_group(body: CreateGroupRequest, request: Request, _=session_dep):
+    conn = connect()
+    try:
+        clash = conn.execute(
+            "SELECT 1 FROM groups WHERE name = ? COLLATE NOCASE", (body.name,)
+        ).fetchone()
+        if clash:
+            raise api_error(409, "CONFLICT", f"Nama grup '{body.name}' sudah dipakai.")
+        creator = _resolve_agent_row(conn, body.as_agent)
+        cur = conn.execute(
+            "INSERT INTO groups (name, description, created_by) VALUES (?, ?, ?)",
+            (body.name, body.description, creator["id"]),
+        )
+        group_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
+            (group_id, creator["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return JSONResponse(
+        status_code=201,
+        content={
+            "status": "ok",
+            "data": {
+                "group_id": group_id,
+                "name": body.name,
+                "creator": body.as_agent,
+            },
+        },
+    )
+
+
+@router.post("/groups/{name}/join")
+@limiter.limit(lambda: settings.rate_limit_default)
+def join_group(name: str, body: JoinGroupRequest, request: Request, _=session_dep):
+    conn = connect()
+    try:
+        agent = _resolve_agent_row(conn, body.as_agent)
+        group = conn.execute(
+            "SELECT id, name FROM groups WHERE name = ? COLLATE NOCASE", (name,)
+        ).fetchone()
+        if group is None:
+            raise api_error(404, "NOT_FOUND", f"Grup '{name}' tidak ditemukan.")
+        existing = conn.execute(
+            "SELECT joined_at FROM group_members WHERE group_id = ? AND agent_id = ?",
+            (group["id"], agent["id"]),
+        ).fetchone()
+        if existing:
+            return {"status": "ok", "data": {"group": name, "joined_at": existing["joined_at"], "already_member": True}}
+        conn.execute(
+            "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
+            (group["id"], agent["id"]),
+        )
+        joined_at = conn.execute(
+            "SELECT joined_at FROM group_members WHERE group_id = ? AND agent_id = ?",
+            (group["id"], agent["id"]),
+        ).fetchone()["joined_at"]
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok", "data": {"group": name, "joined_at": joined_at, "already_member": False}}
+
 
 @router.get("/groups")
 @limiter.limit(lambda: settings.rate_limit_default)

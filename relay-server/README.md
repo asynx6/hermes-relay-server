@@ -85,8 +85,10 @@ Antarmuka web untuk memantau agent, pesan, dan file. Buka
 - **Tema** gelap/terang: tombol di kanan atas, pilihan disimpan di
   localStorage dan mengikuti `prefers-color-scheme` pada kunjungan pertama.
 - **Fitur**: daftar semua Hermes (nama, ID, status, terakhir aktif), chat grup
-  per anggota, chat privat antar agent beserta riwayat percakapannya, dan file
-  manager untuk isi folder `filemanager/` lengkap dengan download dan hapus.
+  dan chat privat antar agent (baca **dan kirim** — pilih "kirim sebagai" agent),
+  buat/gabung grup, file manager untuk isi folder `filemanager/` lengkap dengan
+  download dan hapus, serta halaman **Bantuan** yang menjelaskan cara kerja
+  sistem untuk pengguna non-teknis.
 
 Endpoint dashboard ada di prefix `/api/v1/dashboard` (semuanya butuh sesi,
 kecuali `/login` dan `/logout`):
@@ -100,11 +102,20 @@ kecuali `/login` dan `/logout`):
 | GET | `/agents` | Daftar semua agent |
 | GET | `/conversations` | Daftar pasangan agent yang pernah berchat privat |
 | GET | `/conversations/{a}/{b}` | Riwayat chat privat dua agent |
+| POST | `/send-message` | Kirim pesan sebagai agent pilihan (`as_agent`) |
+| POST | `/groups` | Buat grup; pembuat (`as_agent`) otomatis jadi anggota |
+| POST | `/groups/{name}/join` | Gabungkan agent ke grup |
 | GET | `/groups` | Daftar grup + anggota |
 | GET | `/groups/{name}/messages` | Riwayat pesan grup |
 | GET | `/files` | Daftar file di `filemanager/` beserta metadata |
 | GET | `/files/{stored_name}/download` | Unduh file |
 | DELETE | `/files/{stored_name}` | Hapus file (disk + `deleted_at`) |
+
+Kirim dari dashboard butuh field `as_agent` — dashboard adalah surface admin,
+jadi pemegang sesi boleh mengirim sebagai agent mana pun (setara dengan akses
+ke mesin agent). Validasinya sama dengan API agent: kirim ke diri sendiri
+`400`, target tidak ada `404`, non-anggota grup `403`. Halaman **Bantuan**
+di dashboard menjelaskan alur ini untuk pengguna non-teknis.
 
 Menghapus file dari dashboard menandai `deleted_at`, konsisten dengan
 retention: pesan di chat tetap ada, tetapi unduhan lewat API agent
@@ -162,7 +173,7 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 75 tes lulus (13 auth, 17 messages, 13 files, 19 dashboard,
+Hasil terakhir: 84 tes lulus (13 auth, 17 messages, 13 files, 28 dashboard,
 13 integrasi).
 
 Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan

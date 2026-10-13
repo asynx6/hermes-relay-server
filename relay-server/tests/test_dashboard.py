@@ -8,7 +8,7 @@ from pathlib import Path
 import jwt
 import pytest
 
-from conftest import register_agent, send
+from conftest import fetch, register_agent, send
 
 API = "/api/v1/dashboard"
 
@@ -304,3 +304,185 @@ def test_file_message_metadata_in_chat_views(client, tmp_path):
     assert msgs[0]["content"] == "Dataset scraping"
     assert msgs[0]["file"]["original_name"] == "dataset.csv"
     assert msgs[0]["file"]["size_bytes"] == len(payload)
+
+
+# ---------------------------------------------------------------------------
+# Kirim pesan & kelola grup dari dashboard
+# ---------------------------------------------------------------------------
+
+def test_dashboard_send_direct(client):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    login(client)
+
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-a",
+            "target_type": "direct",
+            "target": "hermes-b",
+            "content": "Halo dari dashboard",
+        },
+    )
+    assert r.status_code == 201
+    assert r.json()["data"]["from"] == "hermes-a"
+
+    # Penerima benar-benar menerima lewat API agent (bukan cuma tampil di dashboard).
+    msgs = fetch(client, b["secret_key"])["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["content"] == "Halo dari dashboard"
+    assert msgs[0]["from"] == "hermes-a"
+    assert msgs[0]["scope"] == "direct"
+
+
+def test_dashboard_send_direct_self_rejected(client):
+    register_agent(client, "hermes-a")
+    login(client)
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-a",
+            "target_type": "direct",
+            "target": "hermes-a",
+            "content": "ke diri sendiri",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == "BAD_REQUEST"
+
+
+def test_dashboard_send_unknown_agent(client):
+    register_agent(client, "hermes-a")
+    login(client)
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-hantu",
+            "target_type": "direct",
+            "target": "hermes-a",
+            "content": "x",
+        },
+    )
+    assert r.status_code == 404
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-a",
+            "target_type": "direct",
+            "target": "hermes-hantu",
+            "content": "x",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_dashboard_send_group_non_member(client):
+    a = register_agent(client, "hermes-a")
+    outsider = register_agent(client, "hermes-x")
+    client.post(
+        "/api/v1/groups",
+        headers={"Authorization": f"Bearer {a['secret_key']}"},
+        json={"name": "research-team"},
+    )
+    login(client)
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-x",
+            "target_type": "group",
+            "target": "research-team",
+            "content": "intrusi",
+        },
+    )
+    assert r.status_code == 403
+    assert r.json()["code"] == "FORBIDDEN"
+
+
+def test_dashboard_send_requires_session(client):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-a",
+            "target_type": "direct",
+            "target": "hermes-b",
+            "content": "tanpa sesi",
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_dashboard_group_full_flow(client):
+    """Buat grup, agent gabung, kirim pesan grup — semuanya dari dashboard."""
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    login(client)
+
+    r = client.post(
+        f"{API}/groups",
+        json={"as_agent": "hermes-a", "name": "tim-dash", "description": "Grup dari dashboard"},
+    )
+    assert r.status_code == 201
+    assert r.json()["data"]["creator"] == "hermes-a"
+
+    # Pembuat otomatis anggota; cek lewat daftar grup.
+    groups = client.get(f"{API}/groups").json()["data"]["groups"]
+    assert groups[0]["members"] == ["hermes-a"]
+
+    # B gabung lewat dashboard.
+    r = client.post(f"{API}/groups/tim-dash/join", json={"as_agent": "hermes-b"})
+    assert r.status_code == 200
+    assert r.json()["data"]["already_member"] is False
+
+    # Join ulang: idempotent.
+    r = client.post(f"{API}/groups/tim-dash/join", json={"as_agent": "hermes-b"})
+    assert r.json()["data"]["already_member"] is True
+
+    # A kirim pesan grup lewat dashboard.
+    r = client.post(
+        f"{API}/send-message",
+        json={
+            "as_agent": "hermes-a",
+            "target_type": "group",
+            "target": "tim-dash",
+            "content": "Update dari dashboard",
+        },
+    )
+    assert r.status_code == 201
+
+    # B menerima lewat API agent; A (pengirim) tidak.
+    msgs = fetch(client, b["secret_key"])["messages"]
+    assert [m["content"] for m in msgs] == ["Update dari dashboard"]
+    assert msgs[0]["group"] == "tim-dash"
+    assert fetch(client, a["secret_key"])["messages"] == []
+
+    # Tampilan grup di dashboard menampilkan pesan dan anggota.
+    data = client.get(f"{API}/groups/tim-dash/messages").json()["data"]
+    assert [m["content"] for m in data["messages"]] == ["Update dari dashboard"]
+    groups = client.get(f"{API}/groups").json()["data"]["groups"]
+    assert sorted(groups[0]["members"]) == ["hermes-a", "hermes-b"]
+
+
+def test_dashboard_create_group_duplicate(client):
+    a = register_agent(client, "hermes-a")
+    login(client)
+    r = client.post(f"{API}/groups", json={"as_agent": "hermes-a", "name": "tim-dup"})
+    assert r.status_code == 201
+    r = client.post(f"{API}/groups", json={"as_agent": "hermes-a", "name": "tim-dup"})
+    assert r.status_code == 409
+    assert r.json()["code"] == "CONFLICT"
+
+
+def test_dashboard_create_group_invalid_name(client):
+    a = register_agent(client, "hermes-a")
+    login(client)
+    r = client.post(f"{API}/groups", json={"as_agent": "hermes-a", "name": "Nama Salah"})
+    assert r.status_code == 422
+
+
+def test_dashboard_join_unknown_group(client):
+    a = register_agent(client, "hermes-a")
+    login(client)
+    r = client.post(f"{API}/groups/tidak-ada/join", json={"as_agent": "hermes-a"})
+    assert r.status_code == 404

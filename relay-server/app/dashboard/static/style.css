@@ -227,6 +227,49 @@ tbody tr:hover { background: var(--surface-2); }
 #password-message.ok { color: var(--ok); }
 #password-message.err { color: var(--danger); }
 
+/* ---------- Bantuan ---------- */
+.help-doc { max-width: 760px; line-height: 1.6; }
+.help-doc h3 { margin: 18px 0 8px; font-size: 15px; }
+.help-doc ol, .help-doc ul { margin: 0; padding-left: 22px; }
+.help-doc li { margin-bottom: 6px; }
+.help-doc code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 13px;
+}
+
+/* ---------- Composer & form kecil di sidebar ---------- */
+select {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+}
+select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+.composer input { flex: 1; }
+
+.side-new {
+  padding: 10px;
+  margin: 8px 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.side-new label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed;

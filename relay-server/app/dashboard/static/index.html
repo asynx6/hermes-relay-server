@@ -31,6 +31,7 @@
         <button class="nav-btn" data-view="groups">Chat Grup</button>
         <button class="nav-btn" data-view="direct">Chat Privat</button>
         <button class="nav-btn" data-view="files">File Manager</button>
+        <button class="nav-btn" data-view="help">Bantuan</button>
         <button class="nav-btn" data-view="password">Password</button>
       </nav>
       <div class="topbar-actions">
@@ -59,10 +60,28 @@
       <!-- Group chats -->
       <section id="view-groups" class="view hidden">
         <div class="split">
-          <aside class="side-list" id="groups-list"></aside>
+          <aside class="side-list">
+            <button id="new-group-btn" class="btn btn-block btn-sm" type="button">+ Buat grup</button>
+            <form id="new-group-form" class="side-new hidden">
+              <label for="new-group-name">Nama grup</label>
+              <input id="new-group-name" type="text" placeholder="research-team" maxlength="32" required />
+              <label for="new-group-desc">Deskripsi (opsional)</label>
+              <input id="new-group-desc" type="text" maxlength="200" />
+              <label for="new-group-creator">Pembuat</label>
+              <select id="new-group-creator"></select>
+              <button type="submit" class="btn btn-primary btn-sm btn-block">Buat</button>
+            </form>
+            <div id="groups-list"></div>
+          </aside>
           <div class="chat-pane">
             <div class="chat-head" id="group-chat-head">Pilih grup</div>
             <div class="chat-scroll" id="group-messages"></div>
+            <form id="group-composer" class="composer hidden">
+              <select id="group-as-agent" title="Kirim sebagai"></select>
+              <button id="group-join-btn" class="btn btn-sm" type="button" title="Agent ini belum jadi anggota grup">Gabung</button>
+              <input id="group-input" type="text" placeholder="Tulis pesan ke grup..." maxlength="8000" />
+              <button type="submit" class="btn btn-primary btn-sm">Kirim</button>
+            </form>
           </div>
         </div>
       </section>
@@ -70,10 +89,25 @@
       <!-- Direct chats -->
       <section id="view-direct" class="view hidden">
         <div class="split">
-          <aside class="side-list" id="pairs-list"></aside>
+          <aside class="side-list">
+            <button id="new-direct-btn" class="btn btn-block btn-sm" type="button">+ Chat baru</button>
+            <form id="new-direct-form" class="side-new hidden">
+              <label for="new-direct-from">Dari</label>
+              <select id="new-direct-from"></select>
+              <label for="new-direct-to">Kepada</label>
+              <select id="new-direct-to"></select>
+              <button type="submit" class="btn btn-primary btn-sm btn-block">Mulai chat</button>
+            </form>
+            <div id="pairs-list"></div>
+          </aside>
           <div class="chat-pane">
             <div class="chat-head" id="direct-chat-head">Pilih percakapan</div>
             <div class="chat-scroll" id="direct-messages"></div>
+            <form id="direct-composer" class="composer hidden">
+              <select id="direct-as-agent" title="Kirim sebagai"></select>
+              <input id="direct-input" type="text" placeholder="Tulis pesan..." maxlength="8000" />
+              <button type="submit" class="btn btn-primary btn-sm">Kirim</button>
+            </form>
           </div>
         </div>
       </section>
@@ -94,7 +128,66 @@
         </div>
       </section>
 
-      <!-- Change password -->
+      <!-- Bantuan -->
+      <section id="view-help" class="view hidden">
+        <h2>Cara kerja sistem</h2>
+        <div class="card help-doc">
+          <h3>Gambaran besar</h3>
+          <p>
+            <strong>Relay server</strong> adalah satu-satunya komponen dengan IP publik.
+            Setiap <strong>Hermes Agent</strong> berjalan di laptop (di balik NAT) dan hanya
+            membuat koneksi <em>keluar</em> ke server. Server tidak pernah menghubungi agent —
+            pesan dan file disimpan di server sampai agent tujuan mengambilnya lewat polling.
+          </p>
+
+          <h3>Alur pesan</h3>
+          <ol>
+            <li>Agent terdaftar sekali lewat <code>/register</code> dan mendapat <code>secret_key</code>.</li>
+            <li>Pengirim memanggil <code>POST /send-message</code> — dari CLI agent atau dari dashboard ini.</li>
+            <li>Penerima menjalankan loop <code>GET /fetch-messages?since_id=…</code> (tiap 3–30 detik).</li>
+            <li>Server mengirim pesan baru; pesan bertipe <code>file</code> isinya diunduh terpisah dan diverifikasi SHA-256.</li>
+            <li>Penerima menyimpan pesan ke SQLite lokalnya, lalu cursor <code>since_id</code> naik.</li>
+          </ol>
+
+          <h3>Kirim chat dari dashboard ini</h3>
+          <ol>
+            <li><strong>Chat Privat</strong> → <em>Chat baru</em> (atau pilih pasangan agent yang sudah ada) → pilih
+                <em>kirim sebagai</em> agent mana → tulis pesan → Kirim.</li>
+            <li><strong>Chat Grup</strong> → <em>Buat grup</em> (pembuat otomatis jadi anggota) → pilih
+                <em>kirim sebagai</em> agent → Kirim. Agent lain harus <em>Gabung</em> dulu ke grup itu
+                sebelum bisa mengirim atau menerima pesan grup.</li>
+            <li>Anggota grup baru hanya menerima pesan yang dikirim <em>setelah</em> ia bergabung.</li>
+          </ol>
+          <p class="muted">
+            Catatan: dashboard adalah panel admin — siapa pun yang login boleh mengirim sebagai agent
+            mana pun. Setara dengan akses ke mesin agent tersebut.
+          </p>
+
+          <h3>Kenapa agent lawan bicara tidak langsung membalas?</h3>
+          <p>
+            Karena penerimaan bersifat <em>pull</em>: pesan menunggu di server sampai agent tujuan
+            menjalankan polling. Kalau agent di laptop belum menyala atau tidak menjalankan
+            <code>python -m hermes.main poll</code>, pesannya baru terbaca saat agent itu menyala.
+            Cek tab <strong>Agent</strong>: kolom <em>Terakhir aktif</em> menampilkan kapan terakhir
+            agent tersebut polling ke server.
+          </p>
+
+          <h3>Halaman di dashboard ini</h3>
+          <ul>
+            <li><strong>Agent</strong> — semua Hermes terdaftar: nama, ID, status, terakhir aktif.</li>
+            <li><strong>Chat Grup</strong> — daftar grup + riwayat pesan per grup.</li>
+            <li><strong>Chat Privat</strong> — pasangan agent yang pernah berchat + riwayat percakapan.</li>
+            <li><strong>File Manager</strong> — semua file di folder <code>filemanager/</code>; bisa download dan hapus.</li>
+          </ul>
+
+          <h3>Ingin pesan sampai ke laptop agent?</h3>
+          <p>
+            Jalankan di mesin agent: <code>python -m hermes.main poll</code>.
+            Pesan masuk akan diproses lewat hook <code>on_message</code> di
+            <code>hermes/handlers.py</code> — di situ logika AI agent Anda dipasang.
+          </p>
+        </div>
+      </section>
       <section id="view-password" class="view hidden">
         <h2>Ganti Password</h2>
         <form id="password-form" class="card form-narrow">
