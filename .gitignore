@@ -32,6 +32,7 @@ htmlcov/
 .ruff_cache/
 
 # Editor & OS
+.workbuddy-ai/
 .idea/
 .vscode/
 *.swp
