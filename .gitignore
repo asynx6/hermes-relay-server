@@ -1,0 +1,40 @@
+# Workspace agent lokal (memory log, bukan bagian dari repo)
+.workbuddy-ai/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Rahasia & environment lokal
+.env
+*.local
+
+# Data runtime (DB, filemanager, unduhan) — folder di-track lewat .gitkeep
+*.db
+*.db-wal
+*.db-shm
+data/dashboard_auth.json
+data/dashboard_jwt_secret
+filemanager/*
+!filemanager/.gitkeep
+downloads/*
+!downloads/.gitkeep
+
+# Test & tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editor & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

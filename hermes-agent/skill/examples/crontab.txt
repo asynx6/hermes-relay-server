@@ -1,0 +1,23 @@
+# Contoh crontab untuk Hermes Agent (polling pesan masuk).
+#
+# Pasang: crontab -e, lalu salin baris di bawah (sesuaikan path).
+# Log disimpan di data/cron.log supaya bisa diaudit kalau ada masalah.
+
+# --- Pesan masuk (GET /fetch-messages) setiap menit -------------------------
+* * * * * /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
+
+# --- Alternatif: setiap 5 menit (lebih hemat, latensi pesan sampai 5 menit) --
+# */5 * * * * /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
+
+# --- Alternatif: setiap menit di jam kerja saja ------------------------------
+# * 8-18 * * 1-5 /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
+
+# Catatan:
+# - Cron minimum interval 1 menit. Untuk polling lebih cepat (detik),
+#   jalankan proses panjang: nohup python -m hermes.main poll >> data/poll.log 2>&1 &
+# - Jangan jalankan cron DAN proses panjang untuk agent yang sama; cursor
+#   last_message_id bisa balapan dan pesan bisa terlewat.
+# - fetch-once exit code: 0=ok, 1=server mati, 2=token ditolak (401).
+#   Kalau sistem mengirim email untuk exit != 0, alert langsung berarti.
+# - Log berkembang terus; rotasi dengan logrotate atau bersihkan berkala:
+#   0 0 * * 0 truncate -s 0 /home/user/hermes-agent/data/cron.log

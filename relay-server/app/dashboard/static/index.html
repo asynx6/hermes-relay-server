@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes Relay — Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪽</text></svg>" />
+</head>
+<body>
+  <!-- ==================== Login ==================== -->
+  <div id="login-view" class="login-wrap hidden">
+    <form id="login-form" class="login-card" autocomplete="off">
+      <div class="login-logo">🪽</div>
+      <h1>Hermes Relay</h1>
+      <p class="muted">Dashboard admin</p>
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" placeholder="Password dashboard" required />
+      <p id="login-error" class="error-text hidden"></p>
+      <button type="submit" class="btn btn-primary btn-block">Masuk</button>
+      <p class="muted small">Sesi berlaku 24 jam lalu logout otomatis.</p>
+    </form>
+  </div>
+
+  <!-- ==================== Dashboard ==================== -->
+  <div id="app-view" class="app hidden">
+    <header class="topbar">
+      <div class="brand">🪽 Hermes Relay <span class="muted">Dashboard</span></div>
+      <nav class="nav" id="nav">
+        <button class="nav-btn" data-view="agents">Agent</button>
+        <button class="nav-btn" data-view="groups">Chat Grup</button>
+        <button class="nav-btn" data-view="direct">Chat Privat</button>
+        <button class="nav-btn" data-view="files">File Manager</button>
+        <button class="nav-btn" data-view="password">Password</button>
+      </nav>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="btn btn-icon" title="Ganti tema">🌙</button>
+        <button id="logout-btn" class="btn btn-ghost">Logout</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- Agents -->
+      <section id="view-agents" class="view">
+        <h2>Semua Hermes Agent</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Nama</th><th>Agent ID</th><th>Status</th>
+                <th>Terakhir aktif</th><th>Terdaftar</th><th>Deskripsi</th>
+              </tr>
+            </thead>
+            <tbody id="agents-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Group chats -->
+      <section id="view-groups" class="view hidden">
+        <div class="split">
+          <aside class="side-list" id="groups-list"></aside>
+          <div class="chat-pane">
+            <div class="chat-head" id="group-chat-head">Pilih grup</div>
+            <div class="chat-scroll" id="group-messages"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Direct chats -->
+      <section id="view-direct" class="view hidden">
+        <div class="split">
+          <aside class="side-list" id="pairs-list"></aside>
+          <div class="chat-pane">
+            <div class="chat-head" id="direct-chat-head">Pilih percakapan</div>
+            <div class="chat-scroll" id="direct-messages"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Files -->
+      <section id="view-files" class="view hidden">
+        <h2>File Manager <span class="muted" id="files-count"></span></h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Nama asli</th><th>Ukuran</th><th>Pengunggah</th><th>Tujuan</th>
+                <th>Waktu</th><th>Unduhan</th><th>Status</th><th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="files-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Change password -->
+      <section id="view-password" class="view hidden">
+        <h2>Ganti Password</h2>
+        <form id="password-form" class="card form-narrow">
+          <label for="old-password">Password lama</label>
+          <input id="old-password" type="password" required />
+          <label for="new-password">Password baru</label>
+          <input id="new-password" type="password" required minlength="6" />
+          <label for="new-password2">Ulangi password baru</label>
+          <input id="new-password2" type="password" required minlength="6" />
+          <p id="password-message" class="hidden"></p>
+          <button type="submit" class="btn btn-primary">Simpan</button>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>

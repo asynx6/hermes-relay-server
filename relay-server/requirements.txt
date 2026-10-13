@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+slowapi
+pyjwt
+pytest
+httpx

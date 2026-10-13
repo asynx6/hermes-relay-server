@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+venv/
+.pytest_cache/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+filemanager/*
+!filemanager/.gitkeep
+downloads/*
+!downloads/.gitkeep

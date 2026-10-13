@@ -1,0 +1,10 @@
+{
+  "server_url": "http://127.0.0.1:8000/api/v1",
+  "registration_key": "isi-registration-key-dari-server",
+  "agent_name": "hermes-alpha",
+  "secret_key": "",
+  "poll_min_seconds": 3,
+  "poll_max_seconds": 30,
+  "download_dir": "downloads",
+  "max_upload_mb": 25
+}

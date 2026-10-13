@@ -1,0 +1,8 @@
+ding/
+*.pyc
+__pycache__/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+downloads/*
+!downloads/.gitkeep
