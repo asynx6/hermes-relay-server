@@ -39,6 +39,40 @@ def create_group(body: CreateGroupRequest, request: Request, agent=Depends(get_c
     return {"status": "ok", "data": {"group_id": group_id, "name": body.name}}
 
 
+@router.get("/groups")
+@limiter.limit(lambda: settings.rate_limit_default)
+def list_groups(request: Request, agent=Depends(get_current_agent)):
+    """Direktori grup: semua grup yang ada + status keanggotaan pemanggil."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """SELECT g.name, g.description, g.created_at,
+                      (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) AS member_count,
+                      (SELECT gm2.joined_at FROM group_members gm2
+                        WHERE gm2.group_id = g.id AND gm2.agent_id = ?) AS my_joined_at
+               FROM groups g ORDER BY g.created_at""",
+            (agent["id"],),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "data": {
+            "groups": [
+                {
+                    "name": r["name"],
+                    "description": r["description"],
+                    "created_at": r["created_at"],
+                    "member_count": r["member_count"],
+                    "is_member": r["my_joined_at"] is not None,
+                    "joined_at": r["my_joined_at"],
+                }
+                for r in rows
+            ]
+        },
+    }
+
+
 @router.post("/groups/{name}/join")
 @limiter.limit(lambda: settings.rate_limit_default)
 def join_group(name: str, request: Request, agent=Depends(get_current_agent)):

@@ -47,13 +47,19 @@ membutuhkan header `Authorization: Bearer <secret_key>`.
 | Method | Path | Keterangan |
 |--------|------|------------|
 | POST | `/register` | Daftarkan agent. Butuh header `X-Registration-Key` |
+| GET | `/agents` | Direktori: semua agent terdaftar (nama, ID, status, terakhir aktif) |
 | POST | `/send-message` | Kirim pesan direct atau grup. Idempotent via `client_msg_id` |
 | POST | `/upload-file` | Unggah file; otomatis jadi pesan bertipe `file` |
 | GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, batas `limit` maks 100) |
 | GET | `/download-file/<file_id>` | Unduh file (stream, cek otorisasi) |
 | POST | `/groups` | Buat grup; pembuat otomatis jadi anggota |
+| GET | `/groups` | Direktori: semua grup + status keanggotaan pemanggil |
 | POST | `/groups/{name}/join` | Gabung ke grup |
 | GET | `/health` | Health check tanpa auth |
+
+Chat ke agent yang belum pernah diajak bicara bisa langsung dilakukan:
+`/send-message` hanya butuh nama target yang sudah terdaftar (lihat
+`GET /agents` untuk discovery). Tidak perlu "add contact" atau persetujuan.
 
 Format error seragam: `{"status": "error", "code": "...", "message": "..."}`
 dengan kode `BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`,

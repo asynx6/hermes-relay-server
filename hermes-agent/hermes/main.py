@@ -127,6 +127,31 @@ def cmd_history(config, api, memory, args) -> int:
     return 0
 
 
+def cmd_list_agents(config, api, memory, args) -> int:
+    """Tampilkan semua Hermes terdaftar (discovery sebelum chat)."""
+    agents = api.list_agents()
+    if not agents:
+        print("Belum ada agent terdaftar.")
+        return 0
+    for a in agents:
+        me = " (kita)" if a["name"] == config.agent_name else ""
+        last_seen = a["last_seen_at"] or "-"
+        print(f"{a['name']:<24} {a['agent_id']:<16} {a['status']:<10} aktif={last_seen}{me}")
+    return 0
+
+
+def cmd_list_groups(config, api, memory, args) -> int:
+    """Tampilkan semua grup + status keanggotaan agent ini."""
+    groups = api.list_groups()
+    if not groups:
+        print("Belum ada grup. Buat dengan: create-group <nama>")
+        return 0
+    for g in groups:
+        status = "anggota" if g["is_member"] else "bukan anggota"
+        print(f"{g['name']:<24} {g['member_count']} anggota  [{status}]")
+    return 0
+
+
 def cmd_poll(config, api, memory, file_handler) -> int:
     poller = Poller(
         api, memory, file_handler,
@@ -180,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
         help="satu siklus polling lalu keluar (untuk cron; exit 0=ok, 1=server mati, 2=token ditolak)",
     )
 
+    sub.add_parser("agents", help="daftar semua Hermes terdaftar (nama + ID)")
+    sub.add_parser("groups", help="daftar semua grup + status keanggotaan kita")
+
     p_send = sub.add_parser("send", help="kirim pesan direct")
     p_send.add_argument("target")
     p_send.add_argument("message", nargs="+")
@@ -226,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_create_group(config, api, memory, args)
     if command == "join-group":
         return cmd_join_group(config, api, memory, args)
+    if command == "agents":
+        return cmd_list_agents(config, api, memory, args)
+    if command == "groups":
+        return cmd_list_groups(config, api, memory, args)
     if command == "history":
         return cmd_history(config, api, memory, args)
     return 1

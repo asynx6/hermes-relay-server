@@ -1,13 +1,19 @@
-"""POST /register dan GET /health."""
+"""POST /register, GET /agents (direktori), dan GET /health."""
 import json
 
-from fastapi import APIRouter, Header, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 
 from ..config import settings
 from ..database import connect
 from ..ratelimit import limiter
 from ..schemas import RegisterRequest
-from ..security import api_error, check_registration_key, generate_secret, hash_secret
+from ..security import (
+    api_error,
+    check_registration_key,
+    generate_secret,
+    get_current_agent,
+    hash_secret,
+)
 from ..services import message_service
 
 router = APIRouter()
@@ -57,6 +63,36 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
             "created_at": created["created_at"],
         },
         "note": "Simpan secret_key sekarang. Nilai ini tidak akan ditampilkan lagi.",
+    }
+
+
+@router.get("/agents")
+@limiter.limit(lambda: settings.rate_limit_default)
+def list_agents(request: Request, agent=Depends(get_current_agent)):
+    """Direktori agent: siapa saja yang terdaftar (untuk discovery sebelum chat)."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT agent_id, name, description, status, last_seen_at, created_at "
+            "FROM agents ORDER BY created_at"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "data": {
+            "agents": [
+                {
+                    "agent_id": r["agent_id"],
+                    "name": r["name"],
+                    "description": r["description"],
+                    "status": r["status"],
+                    "last_seen_at": r["last_seen_at"],
+                    "created_at": r["created_at"],
+                }
+                for r in rows
+            ]
+        },
     }
 
 

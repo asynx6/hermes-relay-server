@@ -178,6 +178,30 @@ class RelayAPI:
             f"download-file/{file_id} gagal setelah {self.retry_max + 1} percobaan ({last_error})"
         )
 
+    # ---- direktori ----
+
+    def list_agents(self) -> list[dict]:
+        """Semua agent terdaftar (nama + ID) — untuk pilih tujuan chat."""
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            f"{self.base}/agents",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+        )
+        return resp.json()["data"]["agents"]
+
+    def list_groups(self) -> list[dict]:
+        """Semua grup + status keanggotaan agent ini."""
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            f"{self.base}/groups",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+        )
+        return resp.json()["data"]["groups"]
+
     # ---- grup ----
 
     def create_group(self, name: str, description: str | None = None) -> dict:
