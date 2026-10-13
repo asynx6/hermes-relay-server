@@ -1,5 +1,6 @@
 """POST /upload-file, GET /files, dan GET /download-file/<file_id>."""
 import secrets
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -72,20 +73,46 @@ async def upload_file(
     caption: str | None = Form(default=None, max_length=500),
     agent=Depends(get_current_agent),
 ):
+    """Unggah file + buat pesan bertipe file dalam satu alur tervalidasi.
+
+    Validasi berlapis (kegagalan tidak pernah meninggalkan sisa file):
+      1. Form & pola ID                      -> 422
+      2. Content-Length lebih awal           -> 413
+      3. Ekstensi (daftar blokir)            -> 415
+      4. Streaming ke staging: ukuran nyata  -> 413
+      5. File kosong                         -> 400
+      6. Magic bytes: payload eksekusi       -> 415
+      7. (opsional) ekstensi vs isi          -> 415
+    Lalu, dalam transaksi singkat:
+      8. Duplikat client_msg_id (idempotent) -> 200 duplicate
+      9. Target: ID+nama cocok, aktif        -> 404 / 400 (self)
+     10. Keanggotaan grup                    -> 403
+     11. Kuota per agent (kalau diaktifkan)  -> 413
+     12. os.replace atomik + INSERT log+msg
+    """
     if target_type not in ("direct", "group"):
         raise api_error(400, "BAD_REQUEST", "target_type harus 'direct' atau 'group'.")
 
-    # Cek Content-Length lebih awal sebagai pertahanan pertama.
     content_length = request.headers.get("content-length")
     if content_length is not None and int(content_length) > settings.max_upload_bytes:
         raise api_error(413, "FILE_TOO_LARGE", "Melebihi batas ukuran unggahan.")
 
     original_name = file_service.sanitize_filename(file.filename or "file")
+    ext = file_service.safe_extension(original_name)  # 415 sebelum body dibaca
+
+    staging = file_service.staging_path()
+    try:
+        meta = await file_service.stage_upload(file, staging, settings.max_upload_bytes)
+    except file_service.UploadRejected as exc:
+        raise api_error(exc.status_code, exc.code, exc.message)
+
     conn = connect()
+    final_path = None
+    committed = False
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        # Duplikat: file dengan client_msg_id yang sama sudah pernah dikirim.
+        # (8) Idempotency: client_msg_id yang sama -> balas data pesan lama.
         existing = conn.execute(
             """SELECT fl.*, m.id AS message_id FROM file_logs fl
                JOIN messages m ON m.file_id = fl.file_id
@@ -111,6 +138,7 @@ async def upload_file(
                 },
             )
 
+        # (9)+(10) Otorisasi target.
         if target_type == "direct":
             if target_name.strip().lower() == agent["name"].lower():
                 raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim file ke diri sendiri.")
@@ -121,9 +149,24 @@ async def upload_file(
             message_service.ensure_group_member(conn, group["id"], agent["id"])
             recipient_id, group_id = None, group["id"]
 
-        dest = file_service.stored_path(original_name)
-        size, sha256 = await file_service.save_upload(file, dest, settings.max_upload_bytes)
+        # (11) Kuota penyimpanan per agent (0 = nonaktif).
+        if settings.max_storage_mb_per_agent > 0:
+            used = conn.execute(
+                "SELECT COALESCE(SUM(size_bytes), 0) AS used FROM file_logs "
+                "WHERE uploader_id = ? AND deleted_at IS NULL",
+                (agent["id"],),
+            ).fetchone()["used"]
+            quota_bytes = settings.max_storage_mb_per_agent * 1024 * 1024
+            if used + meta["size"] > quota_bytes:
+                raise api_error(
+                    413,
+                    "QUOTA_EXCEEDED",
+                    f"Kuota penyimpanan {settings.max_storage_mb_per_agent} MB per agent terlampaui.",
+                )
 
+        # (12) Commit atomik: rename + dua INSERT dalam satu transaksi.
+        dest = file_service.finalize(staging, ext, conn)
+        final_path = dest
         file_id = _new_file_id(conn)
         conn.execute(
             """INSERT INTO file_logs
@@ -134,9 +177,9 @@ async def upload_file(
                 file_id,
                 original_name,
                 dest.name,
-                file.content_type,
-                size,
-                sha256,
+                meta["mime"],
+                meta["size"],
+                meta["sha256"],
                 agent["id"],
                 recipient_id,
                 group_id,
@@ -153,8 +196,23 @@ async def upload_file(
             "SELECT uploaded_at FROM file_logs WHERE file_id = ?", (file_id,)
         ).fetchone()["uploaded_at"]
         conn.commit()
+        committed = True
+    except file_service.UploadRejected as exc:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise api_error(exc.status_code, exc.code, exc.message)
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
+        if not committed:
+            # Kegagalan sebelum commit: staging harus bersih. Kalau rename
+            # sudah terjadi tapi commit gagal, buang file finalnya juga.
+            file_service.discard(staging)
+            if final_path is not None:
+                Path(final_path).unlink(missing_ok=True)
 
     return JSONResponse(
         status_code=201,
@@ -164,10 +222,12 @@ async def upload_file(
                 "file_id": file_id,
                 "message_id": message_id,
                 "original_name": original_name,
-                "size_bytes": size,
-                "mime_type": file.content_type,
-                "sha256": sha256,
+                "size_bytes": meta["size"],
+                "mime_type": meta["mime"],
+                "declared_mime_type": meta["declared_mime"],
+                "sha256": meta["sha256"],
                 "created_at": uploaded_at,
+                "duplicate": False,
             },
         },
     )

@@ -50,6 +50,11 @@ def reset_db() -> None:
 
 
 @pytest.fixture()
+def agents_dir(tmp_path):
+    return tmp_path / "agents"
+
+
+@pytest.fixture()
 def client():
     reset_db()
     app = create_app()

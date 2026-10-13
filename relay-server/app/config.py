@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     rate_limit_default: str = "120/minute"
     rate_limit_login: str = "10/minute"
 
+    # Validasi unggahan
+    max_storage_mb_per_agent: int = Field(default=0, ge=0)  # 0 = tanpa kuota
+    strict_mime_match: bool = False  # True = tolak kalau ekstensi & isi tidak cocok
+
     # Dashboard admin
     dashboard_password: str = "123456"
     session_hours: int = Field(default=24, ge=1, le=8760)

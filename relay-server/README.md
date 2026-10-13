@@ -175,6 +175,63 @@ bersama nama. **Catatan migrasi:** database dev yang dibuat sebelum kolom
 
 Query inti `fetch-messages` ada di `app/services/message_service.py`.
 
+## Validasi unggahan file
+
+Unggahan dirancang untuk banyak agent paralel. Alurnya: **staging dulu,
+baru commit atomik**.
+
+1. Unggahan distream ke `filemanager/.staging/<uuid>.part` **di luar**
+   transaksi database — lock DB tidak ditahan selama transfer jaringan,
+   jadi banyak unggahan bersamaan tidak saling menghalangi.
+2. Setelah transfer selesai, transaksi singkat (`BEGIN IMMEDIATE`) menjalankan
+   cek duplikat → resolusi target → cek kuota → `os.replace` (atomik) ke nama
+   final `<uuid4>.<ext>` → INSERT `file_logs` + `messages` → COMMIT.
+3. Setiap kegagalan membuang file staging; file parsial **tidak pernah**
+   terlihat di lokasi final. Proses yang mati di antara rename dan commit bisa
+   menyisakan file orphan — disapu `scripts/cleanup.py` (juga menyapu staging
+   nyasar lebih tua dari `--staging-hours`).
+
+### Daftar validasi dan perilaku saat gagal
+
+| # | Validasi | Kode gagal | Perilaku |
+|---|----------|-----------|----------|
+| 1 | Autentikasi (Bearer token, agent aktif) | `401 UNAUTHORIZED` | Ditolak sebelum body dibaca |
+| 2 | Form: `target_type`, pola `target_id`, `target_name`, `client_msg_id` UUID4, caption ≤ 500 | `422 VALIDATION_ERROR` | Ditolak oleh Pydantic |
+| 3 | `Content-Length` melebihi `MAX_UPLOAD_MB` | `413 FILE_TOO_LARGE` | Ditolak sebelum body dibaca (pertahanan pertama) |
+| 4 | Ekstensi ada di `BLOCKED_EXT` | `415 UNSUPPORTED_TYPE` | Ditolak sebelum body dibaca |
+| 5 | Ukuran nyata saat streaming > batas | `413 FILE_TOO_LARGE` | Staging dihapus, tidak ada sisa |
+| 6 | File kosong (0 byte) | `400 EMPTY_FILE` | Staging dihapus |
+| 7 | Magic bytes menunjukkan payload eksekusi (PE `MZ`, ELF, Mach-O, Java class, shebang, PHP/ASP) | `415 EXECUTABLE_CONTENT` | Staging dihapus — walau ekstensinya terlihat aman |
+| 8 | Mode ketat: ekstensi bertentangan dengan isi | `415 MIME_MISMATCH` | Hanya aktif kalau `STRICT_MIME_MATCH=true` |
+| 9 | Duplikat `client_msg_id` (retry) | — | Balas `200` + `duplicate: true`, data pesan lama; staging dibuang |
+| 10 | Target: ID dan nama harus cocok, agent aktif | `404 NOT_FOUND` | ID/nama tidak sinkron diperlakukan sebagai target tidak ada |
+| 11 | Kirim ke diri sendiri | `400 BAD_REQUEST` | Ditolak |
+| 12 | Pengirim bukan anggota grup tujuan | `403 FORBIDDEN` | Ditolak |
+| 13 | Kuota per agent terlampaui | `413 QUOTA_EXCEEDED` | Aktif kalau `MAX_STORAGE_MB_PER_AGENT > 0` |
+| 14 | Terlalu banyak request | `429 RATE_LIMITED` | Rate limit per IP |
+
+### Nama file sama
+
+Nama asli **tidak pernah** menjadi path di disk — file disimpan sebagai
+`<uuid4>.<ext>` yang dijamin unik (di-loop sampai tidak ada di disk maupun di
+tabel `file_logs`). Konsekuensinya:
+
+- Dua unggahan dengan nama sama dan isi berbeda → dua file_id, dua versi,
+  keduanya utuh dan bisa diunduh terpisah.
+- Dua unggahan bersamaan dengan nama sama → tetap dua salinan; `os.replace`
+  atomik membuat pembaca tidak pernah melihat file setengah tertulis.
+- Retry dengan `client_msg_id` sama → idempotent: satu baris, satu file.
+
+### Integritas konten
+
+SHA-256 dihitung saat streaming dan disimpan di `file_logs`; penerima
+memverifikasinya setelah mengunduh, dan ketidakcocokan membatalkan unduhan
+(parsial dihapus). `mime_type` yang disimpan adalah **hasil deteksi** dari
+magic bytes, bukan klaim client; kalau deteksi tidak umum (mis. teks polos),
+peta ekstensi yang dipakai (`.csv` → `text/csv`), dan hanya kalau keduanya
+tidak konklusif baru deklarasi client dipakai. Semua tes konkurensi ada di
+`tests/test_upload_concurrency.py` (server sungguhan + 10 thread).
+
 ## Script admin
 
 ```bash
@@ -183,7 +240,7 @@ python scripts/manage.py reset-token <name>   # secret baru, tampil sekali
 python scripts/manage.py suspend <name>       # suspend sementara
 python scripts/manage.py revoke <name>        # cabut akses
 python scripts/manage.py reactivate <name>    # aktifkan kembali
-python scripts/cleanup.py --days 30           # hapus pesan/file lama
+python scripts/cleanup.py --days 30           # hapus pesan/file lama + sapu staging nyasar & orphan
 python scripts/cleanup.py --dry-run           # lihat rencana tanpa eksekusi
 ```
 
@@ -216,8 +273,8 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 98 tes lulus (13 auth, 18 messages, 20 files, 28 dashboard,
-5 direktori, 14 integrasi — termasuk tes beban).
+Hasil terakhir: 111 tes lulus (13 auth, 18 messages, 20 files, 13 konkurensi
+unggahan, 28 dashboard, 5 direktori, 14 integrasi — termasuk tes beban).
 
 Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan
 client Hermes asli. Skenario beban: 10 agent, 1.350 pesan burst,

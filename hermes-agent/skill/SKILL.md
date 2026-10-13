@@ -158,15 +158,35 @@ curl -X POST "$SERVER/upload-file" \
   -F "target_name=hermes-beta" \
   -F "client_msg_id=$(uuidgen)" \
   -F "caption=Laporan Q3 final"
-# 201 -> {"status":"ok","data":{"file_id":"fl_...","message_id":102,"sha256":"...","size_bytes":482133}}
+# 201 -> {"status":"ok","data":{"file_id":"fl_...","message_id":102,"mime_type":"application/pdf",
+#          "declared_mime_type":"...","sha256":"...","size_bytes":482133}}
 ```
 
-Batas dan error: `413` (lewat `MAX_UPLOAD_MB`, default 25 MB — file parsial
-dihapus, tidak ada sisa), `415` (ekstensi diblokir: `.exe`, `.bat`, `.cmd`,
-`.msi`, `.dll`, `.scr`, `.ps1`), `404`, `403`. Nama file dari client tidak pernah
-jadi path di disk; server menyimpannya sebagai `<uuid4>.<ext>` dan hanya
-menyimpan `original_name` yang sudah disanitasi. Duplikat `client_msg_id`
-mengembalikan `200` + `duplicate: true`.
+Validasi berlapis dan perilaku saat gagal:
+
+| Kondisi | Kode | Catatan |
+|---------|------|---------|
+| Token salah / agent non-aktif | `401 UNAUTHORIZED` | Dicek sebelum body dibaca |
+| Field form tidak valid | `422 VALIDATION_ERROR` | Pola ID, UUID4, caption ≤ 500 |
+| `Content-Length` > `MAX_UPLOAD_MB` (default 25 MB) | `413 FILE_TOO_LARGE` | Ditolak sebelum transfer |
+| Ekstensi diblokir (`.exe`, `.bat`, `.cmd`, `.msi`, `.dll`, `.scr`, `.ps1`) | `415 UNSUPPORTED_TYPE` | Ditolak sebelum transfer |
+| Ukuran nyata > batas | `413 FILE_TOO_LARGE` | Staging dihapus, tidak ada sisa |
+| File kosong | `400 EMPTY_FILE` | — |
+| Isi terdeteksi program/eksekusi (magic bytes) | `415 EXECUTABLE_CONTENT` | Walau ekstensinya aman |
+| Target ID/nama tidak cocok / tidak aktif | `404 NOT_FOUND` | Sama seperti send-message |
+| Kirim ke diri sendiri | `400 BAD_REQUEST` | — |
+| Pengirim bukan anggota grup | `403 FORBIDDEN` | — |
+| Kuota per agent terlampaui | `413 QUOTA_EXCEEDED` | Kalau `MAX_STORAGE_MB_PER_AGENT` diaktifkan |
+| Terlalu banyak request | `429 RATE_LIMITED` | Rate limit per IP |
+| `client_msg_id` sudah pernah dipakai | `200 duplicate: true` | Balas pesan lama; aman untuk retry |
+
+Nama file dari client tidak pernah jadi path di disk: unggahan distream ke
+`filemanager/.staging/` lalu dipindahkan atomik (`os.replace`) ke
+`<uuid4>.<ext>` yang dijamin unik. Dua unggahan bernama sama menghasilkan dua
+versi utuh; unggahan bersamaan tidak saling menimpa; retry dengan
+`client_msg_id` sama tetap idempotent. `mime_type` di response adalah hasil
+deteksi magic bytes (bukan klaim client); klaim client dikembalikan di
+`declared_mime_type`.
 
 ### POST /groups dan POST /groups/{name}/join
 
@@ -382,7 +402,10 @@ diteruskan ke LLM atau perintah sistem (risiko prompt injection).
 | `403 FORBIDDEN` kirim ke grup | Agent belum join grup | `join-group <nama>` dulu |
 | `404 NOT_FOUND` kirim pesan | Nama agent/grup salah ketik | Nama case-insensitive, tapi harus persis ejaan |
 | `413 FILE_TOO_LARGE` | Lewat `MAX_UPLOAD_MB` server | Kompres file atau naikkan batas di server |
+| `413 QUOTA_EXCEEDED` | Kuota per agent terlampaui | Minta admin naikkan `MAX_STORAGE_MB_PER_AGENT` |
 | `415 UNSUPPORTED_TYPE` | Ekstensi diblokir server | Zip file-nya, atau minta admin ubah `BLOCKED_EXT` |
+| `415 EXECUTABLE_CONTENT` | Isi file terdeteksi program | Server menolak walau ekstensinya aman; kirim ulang sebagai arsip |
+| `400 EMPTY_FILE` | File 0 byte | Kirim file berisi |
 | `429 RATE_LIMITED` | Terlalu banyak request | Turunkan frekuensi polling; batas default 120/menit |
 | Pesan tidak masuk | Cursor mentok di `last_message_id` | Restart agent; cursor dimuat ulang dari `sync_state` |
 | Unduhan gagal berulang | SHA-256 tidak cocok / file terputus | File parsial dihapus otomatis; siklus berikutnya coba lagi |
