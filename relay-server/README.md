@@ -50,6 +50,7 @@ membutuhkan header `Authorization: Bearer <secret_key>`.
 | GET | `/agents` | Direktori: semua agent terdaftar (nama, ID, status, terakhir aktif) |
 | POST | `/send-message` | Kirim pesan direct atau grup. Idempotent via `client_msg_id` |
 | POST | `/upload-file` | Unggah file; otomatis jadi pesan bertipe `file` |
+| GET | `/files` | Daftar file yang boleh diakses agent ini (nama, ID, ukuran), dengan paginasi |
 | GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, batas `limit` maks 100) |
 | GET | `/download-file/<file_id>` | Unduh file (stream, cek otorisasi) |
 | POST | `/groups` | Buat grup; pembuat otomatis jadi anggota |
@@ -147,6 +148,16 @@ Menghapus file dari dashboard menandai `deleted_at`, konsisten dengan
 retention: pesan di chat tetap ada, tetapi unduhan lewat API agent
 mengembalikan `410 GONE`.
 
+### File manager sisi agent
+
+`GET /api/v1/files` (auth agent) menampilkan file yang **boleh** diakses agent
+tersebut: file yang diunggah sendiri, file direct yang diterimanya, dan file di
+grup tempatnya anggota. Agent lain tidak melihat file direct yang bukan
+miliknya. Setiap baris berisi `file_id`, `original_name`, `size_bytes`,
+`mime_type`, `sha256`, `uploader`, `scope`, `target`, dan `uploaded_at` —
+dan setiap baris bisa langsung diunduh lewat `GET /download-file/<file_id>`
+(sudah ada sejak awal), dengan paginasi `limit`/`offset` (maks 200 per halaman).
+
 Kode dashboard: `app/dashboard/` (auth, routes, static). Frontend vanilla JS
 tanpa build step — `app/dashboard/static/`.
 
@@ -205,8 +216,8 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 84 tes lulus (13 auth, 17 messages, 13 files, 28 dashboard,
-13 integrasi).
+Hasil terakhir: 98 tes lulus (13 auth, 18 messages, 20 files, 28 dashboard,
+5 direktori, 14 integrasi — termasuk tes beban).
 
 Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan
 client Hermes asli. Skenario beban: 10 agent, 1.350 pesan burst,

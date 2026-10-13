@@ -182,6 +182,69 @@ def cmd_list_groups(config, api, memory, args) -> int:
     return 0
 
 
+def fmt_size(n) -> str:
+    if n is None:
+        return "-"
+    units = ["B", "KB", "MB", "GB"]
+    i = 0
+    x = float(n)
+    while x >= 1024 and i < len(units) - 1:
+        x /= 1024
+        i += 1
+    return f"{x:.0f} {units[i]}" if i == 0 else f"{x:.1f} {units[i]}"
+
+
+def cmd_list_files(config, api, memory, args) -> int:
+    """Tampilkan file yang bisa diakses agent ini (nama, ID, ukuran, dll)."""
+    data = api.list_files(limit=args.n)
+    files = data["files"]
+    if not files:
+        print("Tidak ada file yang bisa diakses agent ini.")
+        return 0
+    print(f"{'NAMA':<28} {'FILE ID':<16} {'UKURAN':>9}  {'DARI':<16} {'TUJUAN':<20} WAKTU")
+    print("-" * 108)
+    for f in files:
+        target = f"grup {f['target']}" if f["scope"] == "group" else f["target"]
+        print(
+            f"{f['original_name'][:27]:<28} {f['file_id']:<16} {fmt_size(f['size_bytes']):>9}  "
+            f"{f['uploader'][:15]:<16} {target[:19]:<20} {f['uploaded_at']}"
+        )
+    if data["has_more"]:
+        print(f"... dan {data['total'] - len(files)} file lain; naikkan batas dengan -n.")
+    return 0
+
+
+def _find_file(api, file_id: str, max_pages: int = 20) -> dict | None:
+    """Cari metadata file (nama asli, ukuran, sha256) lewat daftar /files."""
+    offset = 0
+    for _ in range(max_pages):
+        data = api.list_files(limit=50, offset=offset)
+        for f in data["files"]:
+            if f["file_id"] == file_id:
+                return f
+        if not data["has_more"]:
+            return None
+        offset += data["limit"]
+    return None
+
+
+def cmd_download_file(config, api, memory, file_handler, args) -> int:
+    """Unduh file langsung dengan file_id sebagai parameter."""
+    meta = _find_file(api, args.file_id)
+    if meta is None:
+        raise SystemExit(
+            f"File '{args.file_id}' tidak ada di daftar file yang bisa diakses "
+            "agent ini. Jalankan 'files' untuk melihat daftarnya."
+        )
+    print(
+        f"Mengunduh {meta['original_name']} ({fmt_size(meta['size_bytes'])}) "
+        f"dari {meta['file_id']}..."
+    )
+    dest = file_handler.download_by_id(api, meta, memory)
+    print(f"Tersimpan: {dest} (SHA-256 cocok)")
+    return 0
+
+
 def cmd_poll(config, api, memory, file_handler) -> int:
     poller = Poller(
         api, memory, file_handler,
@@ -238,6 +301,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("agents", help="daftar semua Hermes terdaftar (nama + ID)")
     sub.add_parser("groups", help="daftar semua grup + status keanggotaan kita")
 
+    p_files = sub.add_parser("files", help="daftar file yang bisa diakses (nama, ID, ukuran)")
+    p_files.add_argument("-n", type=int, default=50, help="jumlah baris (default 50, maks 200)")
+
+    p_dl = sub.add_parser("download-file", help="unduh file langsung dengan file_id")
+    p_dl.add_argument("file_id")
+
     p_send = sub.add_parser("send", help="kirim pesan direct")
     p_send.add_argument("target")
     p_send.add_argument("message", nargs="+")
@@ -288,6 +357,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list_agents(config, api, memory, args)
     if command == "groups":
         return cmd_list_groups(config, api, memory, args)
+    if command == "files":
+        return cmd_list_files(config, api, memory, args)
+    if command == "download-file":
+        return cmd_download_file(config, api, memory, file_handler, args)
     if command == "history":
         return cmd_history(config, api, memory, args)
     return 1

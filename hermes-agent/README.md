@@ -47,6 +47,8 @@ dari file. File `config.json` memuat secret, jadi permission-nya diatur ke
 | `python -m hermes.main poll` | Sama seperti di atas, eksplisit |
 | `python -m hermes.main agents` | Daftar semua Hermes terdaftar (nama + ID) |
 | `python -m hermes.main groups` | Daftar semua grup + status keanggotaan kita |
+| `python -m hermes.main files [-n 50]` | Daftar file yang bisa diakses: nama, ID, ukuran (tabel) |
+| `python -m hermes.main download-file <file_id>` | Unduh file langsung dengan ID (verifikasi SHA-256) |
 | `python -m hermes.main fetch-once` | Satu siklus polling lalu keluar (untuk cron). Exit 0=ok, 1=server mati, 2=token ditolak |
 | `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
 | `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
@@ -114,7 +116,7 @@ hermes-agent/
 │   ├── api_client.py     # Session tunggal, retry backoff + jitter
 │   ├── poller.py         # loop adaptif, flush outbox, poll_once()
 │   ├── memory.py         # SQLite lokal: conversations, files_history, sync_state
-│   ├── file_handler.py   # unduh streaming 64 KB, verifikasi SHA-256
+│   ├── file_handler.py   # unduh streaming 64 KB, verifikasi SHA-256 (by message & by ID)
 │   └── handlers.py       # hook on_message
 ├── skill/
 │   ├── SKILL.md          # panduan pemakaian + referensi endpoint + resep cron

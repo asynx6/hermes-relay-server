@@ -466,3 +466,46 @@ def test_scenario_12_load_10_agents(live_server, agents_dir):
     )
     # Batas longgar: kegagalan nyata adalah pesan hilang, bukan performa.
     assert p95 < 1.0
+
+
+def test_scenario_13_file_manager_by_id(live_server, agents_dir, tmp_path):
+    """File manager sisi agent: lihat daftar (nama, ID, ukuran) lalu unduh by ID."""
+    a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
+    b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
+    c = AgentHarness(live_server.base_url, "hermes-c", agents_dir / "c")
+
+    payload = os.urandom(2 * 1024 * 1024)
+    src = tmp_path / "dataset-final.csv"
+    src.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+
+    data = a.upload(src, "direct", "hermes-b", caption="Dataset final")
+    file_id = data["file_id"]
+
+    # Penerima melihat file dengan ketiga atribut: nama, ID, ukuran.
+    listing = b.api.list_files()
+    assert listing["total"] == 1
+    entry = listing["files"][0]
+    assert entry["file_id"] == file_id
+    assert entry["original_name"] == "dataset-final.csv"
+    assert entry["size_bytes"] == len(payload)
+
+    # Unduh langsung dengan file_id (bukan lewat pesan).
+    dest = b.file_handler.download_by_id(b.api, entry, b.memory)
+    assert dest.is_file()
+    assert hashlib.sha256(dest.read_bytes()).hexdigest() == expected
+
+    # Riwayat lokal mencatat unduhan berdasarkan ID.
+    row = b.memory.conn.execute(
+        "SELECT * FROM files_history ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == "done"
+    assert row["file_id"] == file_id
+    assert row["sha256"] == expected
+
+    # Agent lain tidak melihat file direct A->B.
+    assert c.api.list_files()["total"] == 0
+
+    # Unduh ulang dengan ID yang tidak ada -> error jelas.
+    with pytest.raises(RuntimeError):
+        b.api.download_file("fl_tidakada000")

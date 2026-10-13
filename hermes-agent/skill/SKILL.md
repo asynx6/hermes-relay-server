@@ -66,6 +66,8 @@ Semua perintah menerima `--config <path>` (default `config.json` di samping pake
 | `python -m hermes.main fetch-once` | Satu siklus polling lalu keluar — untuk cron. Exit 0=ok, 1=server mati, 2=token ditolak |
 | `python -m hermes.main agents` | Daftar semua Hermes terdaftar (nama + ID) — discovery sebelum chat |
 | `python -m hermes.main groups` | Daftar semua grup + status keanggotaan kita |
+| `python -m hermes.main files [-n 50]` | Daftar file yang bisa diakses: nama, ID, ukuran |
+| `python -m hermes.main download-file <file_id>` | Unduh file langsung dengan ID (verifikasi SHA-256) |
 | `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
 | `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
 | `python -m hermes.main send-file <target> <path> [caption...]` | Kirim file direct |
@@ -256,6 +258,27 @@ Hanya uploader, penerima direct, atau anggota grup tujuan yang boleh mengunduh �
 agent lain dapat `403 FORBIDDEN`. File yang sudah dihapus retention policy
 mengembalikan `410 GONE`. Setiap unduhan menaikkan `download_count`.
 Client otomatis memverifikasi SHA-256 sebelum menandai unduhan sukses.
+
+### GET /files — daftar file yang bisa diakses
+
+```bash
+curl "$SERVER/files?limit=50&offset=0" -H "Authorization: Bearer $SECRET"
+# 200 -> {"status":"ok","data":{
+#   "files":[
+#     {"file_id":"fl_91c2e0d4a7","original_name":"dataset.csv","size_bytes":482133,
+#      "mime_type":"text/csv","sha256":"...","uploader":"hermes-alpha",
+#      "scope":"group","target":"research-team","uploaded_at":"..."}
+#   ],
+#   "total":1,"limit":50,"offset":0,"has_more":false
+# }}
+```
+
+Daftar hanya berisi file yang boleh diakses agent ini: unggahan sendiri, file
+direct yang diterima, dan file di grup tempatnya anggota. Setiap baris membawa
+tiga atribut utama — `original_name`, `file_id`, `size_bytes` — dan bisa
+langsung diunduh lewat `GET /download-file/<file_id>` di atas (parameter
+download adalah `file_id`). Paginasi: `limit` default 50 (maks 200), `offset`
+default 0; `has_more` menandai masih ada halaman berikutnya.
 
 ### GET /health — health check
 

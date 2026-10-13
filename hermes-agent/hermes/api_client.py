@@ -115,6 +115,19 @@ class RelayAPI:
 
     # ---- file ----
 
+    def list_files(self, limit: int = 50, offset: int = 0) -> dict:
+        """Daftar file yang boleh diakses agent ini (diunggah sendiri,
+        diterima langsung, atau di grup tempatnya anggota)."""
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            f"{self.base}/files",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+            params={"limit": limit, "offset": offset},
+        )
+        return resp.json()["data"]
+
     def upload_file(self, path: str, target_type: str, target_id: str,
                     target_name: str, client_msg_id: str,
                     caption: str | None = None) -> dict:

@@ -1,7 +1,7 @@
-"""POST /upload-file dan GET /download-file/<file_id>."""
+"""POST /upload-file, GET /files, dan GET /download-file/<file_id>."""
 import secrets
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import settings
@@ -12,6 +12,43 @@ from ..security import api_error, get_current_agent
 from ..services import file_service, message_service
 
 router = APIRouter()
+
+FILES_SELECT = """
+    SELECT fl.file_id, fl.original_name, fl.size_bytes, fl.mime_type,
+           fl.sha256, fl.uploaded_at,
+           u.name AS uploader, r.name AS recipient, g.name AS group_name
+    FROM file_logs fl
+    JOIN agents u ON u.id = fl.uploader_id
+    LEFT JOIN agents r ON r.id = fl.recipient_id
+    LEFT JOIN groups g ON g.id = fl.group_id
+    WHERE fl.deleted_at IS NULL
+      AND (
+            fl.uploader_id = :me
+            OR fl.recipient_id = :me
+            OR EXISTS (
+                SELECT 1 FROM group_members gm
+                WHERE gm.group_id = fl.group_id AND gm.agent_id = :me
+            )
+          )
+"""
+
+
+def _file_out(r) -> dict:
+    if r["recipient"]:
+        scope, target = "direct", r["recipient"]
+    else:
+        scope, target = "group", r["group_name"]
+    return {
+        "file_id": r["file_id"],
+        "original_name": r["original_name"],
+        "size_bytes": r["size_bytes"],
+        "mime_type": r["mime_type"],
+        "sha256": r["sha256"],
+        "uploader": r["uploader"],
+        "scope": scope,
+        "target": target,
+        "uploaded_at": r["uploaded_at"],
+    }
 
 
 def _new_file_id(conn) -> str:
@@ -134,6 +171,40 @@ async def upload_file(
             },
         },
     )
+
+
+@router.get("/files")
+@limiter.limit(lambda: settings.rate_limit_default)
+def list_files(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    agent=Depends(get_current_agent),
+):
+    """Daftar file yang boleh diakses agent ini: yang diunggah sendiri,
+    yang diterima langsung, atau file di grup tempat agent ini anggota.
+    Setiap baris bisa langsung diunduh lewat /download-file/<file_id>."""
+    conn = connect()
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM ({FILES_SELECT})", {"me": agent["id"]}
+        ).fetchone()["n"]
+        rows = conn.execute(
+            FILES_SELECT + " ORDER BY fl.uploaded_at DESC, fl.id DESC LIMIT :limit OFFSET :offset",
+            {"me": agent["id"], "limit": limit, "offset": offset},
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "data": {
+            "files": [_file_out(r) for r in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
+        },
+    }
 
 
 @router.get("/download-file/{file_id}")

@@ -307,3 +307,161 @@ def test_png_upload_content_type(client, tmp_path):
     assert r.status_code == 201
     assert r.json()["data"]["mime_type"] == "image/png"
     assert r.json()["data"]["size_bytes"] == len(PNG_BYTES)
+
+
+# ---------------------------------------------------------------------------
+# GET /files — daftar file yang bisa diakses agent
+# ---------------------------------------------------------------------------
+
+def test_list_files_requires_auth(client):
+    r = client.get("/api/v1/files")
+    assert r.status_code == 401
+    assert r.json()["code"] == "UNAUTHORIZED"
+
+
+def test_list_files_shows_name_id_size(client, tmp_path):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+
+    payload = os.urandom(3000)
+    src = tmp_path / "laporan.pdf"
+    src.write_bytes(payload)
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
+    assert r.status_code == 201
+    file_id = r.json()["data"]["file_id"]
+
+    # Penerima melihat file dengan ketiga atribut: nama, ID, ukuran.
+    data = client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {b['secret_key']}"}
+    ).json()["data"]
+    assert data["total"] == 1
+    f = data["files"][0]
+    assert f["file_id"] == file_id
+    assert f["original_name"] == "laporan.pdf"
+    assert f["size_bytes"] == 3000
+    assert f["uploader"] == "hermes-a"
+    assert f["scope"] == "direct"
+    assert f["target"] == "hermes-b"
+    assert f["uploaded_at"]
+    assert data["has_more"] is False
+
+    # Pengunggah juga melihat file-nya sendiri.
+    data = client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {a['secret_key']}"}
+    ).json()["data"]
+    assert data["total"] == 1
+    assert data["files"][0]["file_id"] == file_id
+
+
+def test_list_files_hides_others_direct_files(client, tmp_path):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    c = register_agent(client, "hermes-c")
+
+    src = tmp_path / "rahasia.bin"
+    src.write_bytes(b"x" * 100)
+    upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
+
+    # C tidak melihat file direct A->B.
+    data = client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {c['secret_key']}"}
+    ).json()["data"]
+    assert data["total"] == 0
+    assert data["files"] == []
+
+
+def test_list_files_group_membership(client, tmp_path):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    outsider = register_agent(client, "hermes-x")
+    group = create_group(client, a["secret_key"], "research-team")
+    client.post(
+        "/api/v1/groups/research-team/join",
+        headers={"Authorization": f"Bearer {b['secret_key']}"},
+    )
+
+    src = tmp_path / "dataset.csv"
+    src.write_bytes(b"id\n1\n2\n")
+    r = upload(
+        client, a["secret_key"], src, "group", "research-team",
+        group["group_id"],
+    )
+    file_id = r.json()["data"]["file_id"]
+
+    for agent in (a, b):
+        data = client.get(
+            "/api/v1/files", headers={"Authorization": f"Bearer {agent['secret_key']}"}
+        ).json()["data"]
+        assert data["total"] == 1
+        assert data["files"][0]["scope"] == "group"
+        assert data["files"][0]["target"] == "research-team"
+
+    data = client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {outsider['secret_key']}"}
+    ).json()["data"]
+    assert data["total"] == 0
+
+
+def test_list_files_excludes_deleted(client, tmp_path):
+    from app.database import connect
+
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    src = tmp_path / "doc.txt"
+    src.write_bytes(b"isi")
+    r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
+    file_id = r.json()["data"]["file_id"]
+
+    conn = connect()
+    conn.execute(
+        "UPDATE file_logs SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        "WHERE file_id = ?",
+        (file_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    data = client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {b['secret_key']}"}
+    ).json()["data"]
+    assert data["total"] == 0
+
+
+def test_list_files_pagination(client, tmp_path):
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+
+    src = tmp_path / "batch.bin"
+    src.write_bytes(b"data")
+    for i in range(3):
+        upload(
+            client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"],
+            client_msg_id=str(uuid.uuid4()),
+        )
+
+    h = {"Authorization": f"Bearer {b['secret_key']}"}
+    page1 = client.get("/api/v1/files?limit=2&offset=0", headers=h).json()["data"]
+    assert len(page1["files"]) == 2
+    assert page1["total"] == 3
+    assert page1["has_more"] is True
+
+    page2 = client.get("/api/v1/files?limit=2&offset=2", headers=h).json()["data"]
+    assert len(page2["files"]) == 1
+    assert page2["has_more"] is False
+
+    # Tidak ada tumpang tindih antar halaman.
+    ids1 = {f["file_id"] for f in page1["files"]}
+    ids2 = {f["file_id"] for f in page2["files"]}
+    assert ids1.isdisjoint(ids2)
+
+
+def test_list_files_limit_bounds(client):
+    a = register_agent(client, "hermes-a")
+    r = client.get(
+        "/api/v1/files?limit=0", headers={"Authorization": f"Bearer {a['secret_key']}"}
+    )
+    assert r.status_code == 422
+    r = client.get(
+        "/api/v1/files?limit=201", headers={"Authorization": f"Bearer {a['secret_key']}"}
+    )
+    assert r.status_code == 422

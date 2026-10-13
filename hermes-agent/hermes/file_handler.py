@@ -21,33 +21,33 @@ class FileHandler:
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
-    def download(self, api, msg: dict, memory) -> Path:
-        """Unduh file dari pesan, verifikasi SHA-256, catat files_history.
-
-        File parsial dihapus kalau unduhan terputus. Status gagal dicatat
-        supaya bisa dicoba lagi di siklus berikutnya.
-        """
-        info = msg["file"]
-        file_id = info["file_id"]
-        original = safe_local_name(info["original_name"])
-        peer = msg["group"] or msg["from"]
-        row_id = memory.record_file(
-            file_id=file_id,
-            direction="download",
-            scope=msg["scope"],
-            peer=peer,
-            original_name=original,
-            size_bytes=info["size_bytes"],
-        )
-
-        # Kalau nama sudah ada, tambahkan akhiran angka supaya tidak menimpa.
+    def _unique_dest(self, original: str) -> Path:
+        """Path di downloads/; kalau nama sudah ada, tambah akhiran angka."""
         dest = self.download_dir / original
         n = 1
         while dest.exists():
             stem, ext = os.path.splitext(original)
             dest = self.download_dir / f"{stem}_{n}{ext}"
             n += 1
+        return dest
 
+    def _save_stream(
+        self, api, file_id: str, original: str, size_expected: int | None,
+        sha_expected: str | None, scope: str, peer: str, memory,
+    ) -> Path:
+        """Inti unduhan: stream ke disk, verifikasi ukuran + SHA-256,
+        catat files_history. File parsial selalu dihapus kalau gagal."""
+        original = safe_local_name(original)
+        row_id = memory.record_file(
+            file_id=file_id,
+            direction="download",
+            scope=scope,
+            peer=peer,
+            original_name=original,
+            size_bytes=size_expected,
+        )
+
+        dest = self._unique_dest(original)
         digest = hashlib.sha256()
         size = 0
         try:
@@ -63,18 +63,45 @@ class FileHandler:
             memory.update_file_status(row_id, "failed")
             raise
 
-        expected = info.get("sha256") or resp.headers.get("X-File-SHA256")
-        actual = digest.hexdigest()
-        if expected and actual != expected:
+        expected_sha = sha_expected or resp.headers.get("X-File-SHA256")
+        actual_sha = digest.hexdigest()
+        if expected_sha and actual_sha != expected_sha:
             dest.unlink(missing_ok=True)
             memory.update_file_status(row_id, "failed")
             raise RuntimeError(
-                f"SHA-256 tidak cocok untuk {original}: {actual} != {expected}"
+                f"SHA-256 tidak cocok untuk {original}: {actual_sha} != {expected_sha}"
             )
-        if info.get("size_bytes") and size != info["size_bytes"]:
+        if size_expected and size != size_expected:
             dest.unlink(missing_ok=True)
             memory.update_file_status(row_id, "failed")
             raise RuntimeError(f"Ukuran file tidak cocok untuk {original}")
 
-        memory.update_file_status(row_id, "done", local_path=str(dest), sha256=actual)
+        memory.update_file_status(row_id, "done", local_path=str(dest), sha256=actual_sha)
         return dest
+
+    def download(self, api, msg: dict, memory) -> Path:
+        """Unduh file dari pesan masuk (dipanggil poller)."""
+        info = msg["file"]
+        return self._save_stream(
+            api,
+            file_id=info["file_id"],
+            original=info["original_name"],
+            size_expected=info.get("size_bytes"),
+            sha_expected=info.get("sha256"),
+            scope=msg["scope"],
+            peer=msg["group"] or msg["from"],
+            memory=memory,
+        )
+
+    def download_by_id(self, api, file_meta: dict, memory) -> Path:
+        """Unduh file langsung dengan file_id (dari daftar /files)."""
+        return self._save_stream(
+            api,
+            file_id=file_meta["file_id"],
+            original=file_meta["original_name"],
+            size_expected=file_meta.get("size_bytes"),
+            sha_expected=file_meta.get("sha256"),
+            scope=file_meta.get("scope", "direct"),
+            peer=file_meta.get("target") or file_meta.get("uploader") or "?",
+            memory=memory,
+        )
