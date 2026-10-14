@@ -245,11 +245,15 @@ def cmd_download_file(config, api, memory, file_handler, args) -> int:
     return 0
 
 
-def cmd_poll(config, api, memory, file_handler) -> int:
-    poller = Poller(
+def build_poller(config, api, memory, file_handler) -> Poller:
+    return Poller(
         api, memory, file_handler,
         poll_min=config.poll_min_seconds, poll_max=config.poll_max_seconds,
     )
+
+
+def cmd_poll(config, api, memory, file_handler) -> int:
+    poller = build_poller(config, api, memory, file_handler)
 
     def handle_signal(signum, frame):
         poller.stop_event.set()
@@ -276,10 +280,7 @@ def cmd_fetch_once(config, api, memory, file_handler) -> int:
     Exit code: 0 = server merespons, 1 = server tidak merespons,
     2 = token ditolak (perlu perhatian manusia).
     """
-    poller = Poller(
-        api, memory, file_handler,
-        poll_min=config.poll_min_seconds, poll_max=config.poll_max_seconds,
-    )
+    poller = build_poller(config, api, memory, file_handler)
     reachable, _ = poller.poll_once()
     if not reachable:
         return 2 if poller.auth_rejected else 1
