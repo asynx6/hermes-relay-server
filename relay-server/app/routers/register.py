@@ -1,10 +1,11 @@
 """POST /register, GET /agents (direktori), dan GET /health."""
 import json
+import sqlite3
 
 from fastapi import APIRouter, Depends, Header, Request, status
 
 from ..config import settings
-from ..database import connect
+from ..database import begin_immediate, connect
 from ..ratelimit import limiter
 from ..schemas import RegisterRequest
 from ..security import (
@@ -19,6 +20,7 @@ from ..services import message_service
 router = APIRouter()
 
 SERVER_VERSION = "1.0.0"
+REPLAY_WINDOW_SQL = "'-10 minutes'"
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
@@ -28,10 +30,36 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
 
     conn = connect()
     try:
+        begin_immediate(conn)
+
+        # 1) Replay: nonce yang sama -> kembalikan secret yang sama.
+        #    Menyelamatkan kasus respons 201 hilang karena timeout: retry
+        #    tidak menghasilkan 409 dan nama agent tidak "terbakar".
+        if body.registration_nonce:
+            replay = conn.execute(
+                "SELECT name, secret FROM registration_replays "
+                "WHERE nonce = ? AND name = ? COLLATE NOCASE",
+                (body.registration_nonce, body.name),
+            ).fetchone()
+            if replay:
+                conn.commit()
+                return {
+                    "status": "ok",
+                    "data": {
+                        "agent_id": _agent_id_of(conn, replay["name"]),
+                        "name": replay["name"],
+                        "secret_key": replay["secret"],
+                        "replayed": True,
+                    },
+                    "note": "Registrasi ini adalah replay dari permintaan sebelumnya.",
+                }
+
+        # 2) Nama sudah dipakai (dan bukan replay) -> konflik.
         clash = conn.execute(
             "SELECT 1 FROM agents WHERE name = ? COLLATE NOCASE", (body.name,)
         ).fetchone()
         if clash:
+            conn.commit()
             raise api_error(409, "CONFLICT", f"Nama '{body.name}' sudah terdaftar.")
 
         secret = generate_secret()
@@ -47,10 +75,28 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
                 json.dumps(body.metadata) if body.metadata is not None else None,
             ),
         )
+        if body.registration_nonce:
+            conn.execute(
+                "INSERT OR REPLACE INTO registration_replays (nonce, name, secret) "
+                "VALUES (?, ?, ?)",
+                (body.registration_nonce, body.name, secret),
+            )
+        conn.execute(
+            "DELETE FROM registration_replays WHERE created_at < "
+            "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
+            (REPLAY_WINDOW_SQL,),
+        )
         conn.commit()
         created = conn.execute(
             "SELECT created_at FROM agents WHERE agent_id = ?", (agent_id,)
         ).fetchone()
+    except (sqlite3.IntegrityError, sqlite3.OperationalError):
+        # Balapan: dua registrasi nama sama bersamaan. Yang kedua kena
+        # UNIQUE (atau lock tulis yang tetap tertahan) di sini, bukan di
+        # cek sebelumnya.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise api_error(409, "CONFLICT", f"Nama '{body.name}' sudah terdaftar.")
     finally:
         conn.close()
 
@@ -64,6 +110,13 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
         },
         "note": "Simpan secret_key sekarang. Nilai ini tidak akan ditampilkan lagi.",
     }
+
+
+def _agent_id_of(conn, name: str) -> str | None:
+    row = conn.execute(
+        "SELECT agent_id FROM agents WHERE name = ? COLLATE NOCASE", (name,)
+    ).fetchone()
+    return row["agent_id"] if row else None
 
 
 @router.get("/agents")

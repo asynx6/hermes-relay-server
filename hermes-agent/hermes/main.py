@@ -2,33 +2,66 @@
 
 Subperintah:
     (tanpa argumen)   jalankan loop polling
-    send <target> <pesan>
-    send-group <grup> <pesan>
-    send-file <target> <path> [caption]
+    poll              loop polling (sama seperti default)
+    fetch-once        satu siklus polling lalu keluar (untuk cron)
+    agents            daftar semua Hermes terdaftar (nama + ID)
+    groups            daftar semua grup + status keanggotaan kita
+    files [-n 50]     daftar file yang bisa diakses (nama, ID, ukuran)
+    download-file <file_id>   unduh file langsung dengan ID
+    send <target> <pesan...>
+    send-group <grup> <pesan...>
+    send-file <target> <path> [caption...]
+    send-task <target> <payload...>   kirim tugas (RPC), tunggu hasil
+    receipts <id,id,...>              cek status penerimaan pesan kita
     create-group <nama> [deskripsi]
     join-group <nama>
     history [n]
 
 Pertama kali dijalankan tanpa secret_key di config.json, agent otomatis
-memanggil /register dan menyimpan hasilnya.
+memanggil /register (dengan nonce idempotency) dan menyimpan hasilnya.
+Loop polling dan fetch-once memakai file lock supaya tidak berjalan dua
+kali bersamaan untuk direktori agent yang sama.
 """
 import argparse
 import signal
 import sys
+import time
 import uuid
 from pathlib import Path
 
 from .api_client import RelayAPI
 from .config import ClientConfig
 from .file_handler import FileHandler
+from .instance_lock import instance_lock
 from .memory import Memory
 from .poller import Poller
+from .safe_text import safe_text
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
 
+def lock_path(args) -> Path:
+    """File lock untuk direktori config yang sama."""
+    return Path(args.config).resolve().parent / "data" / "hermes.lock"
+
+
+def warn_insecure_transport(config: ClientConfig) -> None:
+    url = config.server_url.lower()
+    if url.startswith("http://") and "127.0.0.1" not in url and "localhost" not in url:
+        print(
+            "PERINGATAN: server_url bukan HTTPS — secret_key dikirim sebagai "
+            "header dan bisa disadap. Pakai https:// untuk server jarak jauh.",
+            flush=True,
+        )
+
+
 def ensure_registered(config: ClientConfig) -> None:
-    """Auto-register kalau secret belum ada di config."""
+    """Auto-register kalau secret belum ada di config.
+
+    Mengirim `registration_nonce` yang persisten: kalau respons 201 hilang
+    karena timeout, percobaan berikutnya memutar secret yang sama alih-alih
+    mendapat 409 dan membakar nama agent.
+    """
     if config.registered:
         return
     if not config.registration_key:
@@ -36,10 +69,14 @@ def ensure_registered(config: ClientConfig) -> None:
             "config.json belum berisi secret_key maupun registration_key. "
             "Isi server_url, registration_key, dan agent_name lebih dulu."
         )
+    nonce = config.registration_nonce or str(uuid.uuid4())
     api = RelayAPI(config)
-    data = api.register()
-    config.save_registration(data["secret_key"])
-    print(f"Registrasi berhasil sebagai '{data['name']}' ({data['agent_id']}).")
+    data = api.register(registration_nonce=nonce)
+    config.save_registration(data["secret_key"], registration_nonce=nonce)
+    print(
+        f"Registrasi berhasil sebagai '{data['name']}' ({data['agent_id']})"
+        + (" [replay]" if data.get("replayed") else "") + "."
+    )
 
 
 def open_memory(args) -> Memory:
@@ -153,7 +190,11 @@ def cmd_history(config, api, memory, args) -> int:
         return 0
     for r in reversed(rows):
         who = "kita" if r["direction"] == "out" else r["sender"]
-        print(f"[{r['created_at']}] {who} ({r['scope']} {r['peer']}) [{r['status']}]: {r['content']}")
+        print(
+            f"[{r['created_at']}] {safe_text(who, 64)} "
+            f"({safe_text(r['scope'], 16)} {safe_text(r['peer'], 64)}) "
+            f"[{r['status']}]: {safe_text(r['content'])}"
+        )
     return 0
 
 
@@ -252,7 +293,7 @@ def build_poller(config, api, memory, file_handler) -> Poller:
     )
 
 
-def cmd_poll(config, api, memory, file_handler) -> int:
+def cmd_poll(config, api, memory, file_handler, args) -> int:
     poller = build_poller(config, api, memory, file_handler)
 
     def handle_signal(signum, frame):
@@ -266,24 +307,87 @@ def cmd_poll(config, api, memory, file_handler) -> int:
         "Ctrl+C untuk berhenti.",
         flush=True,
     )
-    try:
-        poller.run()
-    except KeyboardInterrupt:
-        poller.stop_event.set()
-        print("\nPolling dihentikan.", flush=True)
+    # Satu instans per direktori agent: mencegah poll dan cron fetch-once
+    # berjalan bersamaan dengan cursor yang sama.
+    with instance_lock(lock_path(args)):
+        try:
+            poller.run()
+        except KeyboardInterrupt:
+            poller.stop_event.set()
+            print("\nPolling dihentikan.", flush=True)
     return 2 if poller.auth_rejected else 0
 
 
-def cmd_fetch_once(config, api, memory, file_handler) -> int:
+def cmd_fetch_once(config, api, memory, file_handler, args) -> int:
     """Satu siklus polling lalu keluar. Dibuat untuk dipanggil cron.
 
     Exit code: 0 = server merespons, 1 = server tidak merespons,
     2 = token ditolak (perlu perhatian manusia).
     """
     poller = build_poller(config, api, memory, file_handler)
-    reachable, _ = poller.poll_once()
+    with instance_lock(lock_path(args)):
+        reachable, _ = poller.poll_once()
     if not reachable:
         return 2 if poller.auth_rejected else 1
+    return 0
+
+
+def cmd_send_task(config, api, memory, args) -> int:
+    """Kirim tugas (msg_type=task) lalu tunggu hasil (msg_type=result).
+
+    Pola RPC ringan: satu task_id menghubungkan permintaan dan balasan.
+    CLI menunggu hasil sampai timeout sambil polling berkala.
+    """
+    target_id, target_name = resolve_agent(api, args.target)
+    task_id = args.task_id or f"task_{uuid.uuid4().hex[:16]}"
+    payload = " ".join(args.payload)
+
+    client_msg_id = str(uuid.uuid4())
+    memory.save_outgoing(
+        "direct", target_name, target_id, payload, client_msg_id,
+        msg_type="task",
+    )
+    data = api.send_message(
+        "direct", target_id, target_name, payload, client_msg_id,
+        msg_type="task", task_id=task_id, task_status="pending",
+    )
+    row = memory.conn.execute(
+        "SELECT id FROM conversations WHERE client_msg_id = ?", (client_msg_id,)
+    ).fetchone()
+    memory.mark_sent(row["id"], data["message_id"])
+    print(f"Tugas {task_id} dikirim ke {target_name} (message_id={data['message_id']}).")
+
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        time.sleep(args.interval)
+        try:
+            task = api.get_task(task_id)
+        except Exception as exc:
+            print(f"Belum ada hasil ({exc}); coba lagi...", flush=True)
+            continue
+        results = [m for m in task["messages"] if m["msg_type"] == "result"]
+        if results:
+            latest = results[-1]
+            print(
+                f"Hasil dari {safe_text(latest['from'], 64)} "
+                f"({safe_text(latest.get('task_status'), 32)}):"
+            )
+            print(safe_text(latest["content"]))
+            return 0
+    print(f"Timeout {args.timeout}s: belum ada hasil untuk {task_id}.")
+    return 1
+
+
+def cmd_receipts(config, api, memory, args) -> int:
+    """Cek status penerimaan pesan yang kita kirim."""
+    ids = [int(x) for x in args.message_ids.split(",") if x.strip()]
+    receipts = api.receipts(ids)
+    if not receipts:
+        print("Belum ada konfirmasi penerimaan untuk pesan tersebut.")
+        return 0
+    for r in receipts:
+        for seen in r["seen_by"]:
+            print(f"pesan #{r['message_id']}: {seen['agent']} = {seen['status']} ({seen['at']})")
     return 0
 
 
@@ -316,6 +420,16 @@ def main(argv: list[str] | None = None) -> int:
     p_sg.add_argument("group")
     p_sg.add_argument("message", nargs="+")
 
+    p_st = sub.add_parser("send-task", help="kirim tugas (RPC) dan tunggu hasil")
+    p_st.add_argument("target")
+    p_st.add_argument("payload", nargs="+")
+    p_st.add_argument("--task-id", default=None, help="task_id manual (opsional)")
+    p_st.add_argument("--timeout", type=int, default=60)
+    p_st.add_argument("--interval", type=float, default=2.0)
+
+    p_rc = sub.add_parser("receipts", help="cek status penerimaan pesan kita")
+    p_rc.add_argument("message_ids", help="message_id dipisah koma, mis. 12,13")
+
     p_sf = sub.add_parser("send-file", help="kirim file direct")
     p_sf.add_argument("target")
     p_sf.add_argument("path")
@@ -336,18 +450,23 @@ def main(argv: list[str] | None = None) -> int:
 
     config = ClientConfig(args.config)
     ensure_registered(config)
+    warn_insecure_transport(config)
     memory = open_memory(args)
     api = RelayAPI(config)
     file_handler = FileHandler(config.download_dir)
 
     if command == "poll":
-        return cmd_poll(config, api, memory, file_handler)
+        return cmd_poll(config, api, memory, file_handler, args)
     if command == "fetch-once":
-        return cmd_fetch_once(config, api, memory, file_handler)
+        return cmd_fetch_once(config, api, memory, file_handler, args)
     if command == "send":
         return cmd_send(config, api, memory, args)
     if command == "send-group":
         return cmd_send_group(config, api, memory, args)
+    if command == "send-task":
+        return cmd_send_task(config, api, memory, args)
+    if command == "receipts":
+        return cmd_receipts(config, api, memory, args)
     if command == "send-file":
         return cmd_send_file(config, api, memory, file_handler, args)
     if command == "create-group":

@@ -31,6 +31,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# Artefak paket (dibuat ulang, tidak pernah di-commit)
+*.zip
+
 # Editor & OS
 .workbuddy-ai/
 .idea/

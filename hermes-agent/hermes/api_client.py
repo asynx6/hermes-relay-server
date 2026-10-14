@@ -4,9 +4,11 @@ Retry hanya untuk kegagalan sementara (ConnectionError, Timeout, 429, 5xx).
 Kesalahan 4xx lain bersifat permanen dan langsung dikembalikan ke pemanggil.
 send-message dan upload-file aman di-retry karena client_msg_id idempotent.
 """
+import json
 import os
 import random
 import time
+from urllib.parse import quote
 
 import requests
 
@@ -20,6 +22,18 @@ class RelayUnavailable(Exception):
 
 class AuthRejected(Exception):
     """Server menolak token (401). Polling harus berhenti, bukan retry."""
+
+
+def parse_json(resp) -> dict:
+    """Parse respons JSON dengan aman. Halaman HTML dari proxy/CDN tidak
+    boleh menjadi JSONDecodeError mentah — jadi error yang informatif."""
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError):
+        preview = (resp.text or "")[:200].replace("\n", " ")
+        raise RuntimeError(
+            f"Respons bukan JSON (HTTP {resp.status_code}): {preview}"
+        )
 
 
 def request_with_retry(session, method, url, max_retries=5, base=1.0, cap=60.0, **kwargs):
@@ -58,7 +72,16 @@ class RelayAPI:
 
     # ---- registrasi ----
 
-    def register(self) -> dict:
+    def register(self, registration_nonce: str | None = None) -> dict:
+        """Daftarkan agent. Kalau nonce dikirim dan respons sebelumnya
+        hilang, server memutar ulang secret yang sama alih-alih 409."""
+        payload = {
+            "name": self.config.agent_name,
+            "description": "Hermes agent",
+            "metadata": {"client_version": "1.0.0"},
+        }
+        if registration_nonce:
+            payload["registration_nonce"] = registration_nonce
         resp = request_with_retry(
             self.session,
             "POST",
@@ -66,22 +89,26 @@ class RelayAPI:
             max_retries=self.retry_max,
             base=self.retry_base,
             headers={"X-Registration-Key": self.config.registration_key},
-            json={
-                "name": self.config.agent_name,
-                "description": "Hermes agent",
-                "metadata": {"client_version": "1.0.0"},
-            },
+            json=payload,
         )
         if resp.status_code != 201:
-            raise RuntimeError(f"Registrasi gagal: {resp.status_code} {resp.text}")
-        return resp.json()["data"]
+            raise RuntimeError(
+                f"Registrasi gagal: {resp.status_code} {parse_json(resp)}"
+            )
+        return parse_json(resp)["data"]
 
     # ---- pesan ----
 
     def send_message(self, target_type: str, target_id: str, target_name: str,
                      content: str, client_msg_id: str,
-                     reply_to: int | None = None) -> dict:
-        """Kirim pesan. Target selalu pasangan (target_id, target_name)."""
+                     reply_to: int | None = None,
+                     msg_type: str = "text",
+                     task_id: str | None = None,
+                     task_status: str | None = None) -> dict:
+        """Kirim pesan. Target selalu pasangan (target_id, target_name).
+
+        msg_type 'task'/'result' memakai task_id untuk pola RPC ringan.
+        """
         resp = request_with_retry(
             self.session,
             "POST",
@@ -95,9 +122,12 @@ class RelayAPI:
                 "target_name": target_name,
                 "content": content,
                 "reply_to": reply_to,
+                "msg_type": msg_type,
+                "task_id": task_id,
+                "task_status": task_status,
             },
         )
-        body = resp.json()
+        body = parse_json(resp)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Kirim pesan gagal: {resp.status_code} {body}")
         return body["data"]
@@ -111,7 +141,7 @@ class RelayAPI:
             base=self.retry_base,
             params={"since_id": since_id, "limit": limit},
         )
-        return resp.json()["data"]
+        return parse_json(resp)["data"]
 
     # ---- file ----
 
@@ -126,7 +156,7 @@ class RelayAPI:
             base=self.retry_base,
             params={"limit": limit, "offset": offset},
         )
-        return resp.json()["data"]
+        return parse_json(resp)["data"]
 
     def upload_file(self, path: str, target_type: str, target_id: str,
                     target_name: str, client_msg_id: str,
@@ -157,7 +187,7 @@ class RelayAPI:
                 if resp.status_code == 401:
                     raise AuthRejected(AUTH_REJECTED_MSG)
                 if resp.status_code not in RETRYABLE_STATUS:
-                    body = resp.json()
+                    body = parse_json(resp)
                     if resp.status_code not in (200, 201):
                         raise RuntimeError(f"Upload gagal: {resp.status_code} {body}")
                     return body["data"]
@@ -208,7 +238,7 @@ class RelayAPI:
             max_retries=self.retry_max,
             base=self.retry_base,
         )
-        return resp.json()["data"]["agents"]
+        return parse_json(resp)["data"]["agents"]
 
     def list_groups(self) -> list[dict]:
         """Semua grup + status keanggotaan agent ini."""
@@ -219,7 +249,44 @@ class RelayAPI:
             max_retries=self.retry_max,
             base=self.retry_base,
         )
-        return resp.json()["data"]["groups"]
+        return parse_json(resp)["data"]["groups"]
+
+    # ---- ack & receipt ----
+
+    def ack(self, message_ids: list[int], status: str = "delivered") -> dict:
+        """Konfirmasi ke server bahwa pesan sudah diterima/dibaca."""
+        resp = request_with_retry(
+            self.session,
+            "POST",
+            f"{self.base}/ack",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+            json={"message_ids": message_ids, "status": status},
+        )
+        return parse_json(resp)["data"]
+
+    def receipts(self, message_ids: list[int]) -> list[dict]:
+        """Status penerimaan pesan yang kita kirim."""
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            f"{self.base}/receipts",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+            params={"message_ids": ",".join(str(i) for i in message_ids)},
+        )
+        return parse_json(resp)["data"]["receipts"]
+
+    def get_task(self, task_id: str) -> dict:
+        """Riwayat satu tugas (task + result)."""
+        resp = request_with_retry(
+            self.session,
+            "GET",
+            f"{self.base}/tasks/{quote(task_id)}",
+            max_retries=self.retry_max,
+            base=self.retry_base,
+        )
+        return parse_json(resp)["data"]
 
     # ---- grup ----
 
@@ -232,7 +299,7 @@ class RelayAPI:
             base=self.retry_base,
             json={"name": name, "description": description},
         )
-        body = resp.json()
+        body = parse_json(resp)
         if resp.status_code != 201:
             raise RuntimeError(f"Buat grup gagal: {resp.status_code} {body}")
         return body["data"]
@@ -241,11 +308,11 @@ class RelayAPI:
         resp = request_with_retry(
             self.session,
             "POST",
-            f"{self.base}/groups/{name}/join",
+            f"{self.base}/groups/{quote(name)}/join",
             max_retries=self.retry_max,
             base=self.retry_base,
         )
-        body = resp.json()
+        body = parse_json(resp)
         if resp.status_code != 200:
             raise RuntimeError(f"Join grup gagal: {resp.status_code} {body}")
         return body["data"]

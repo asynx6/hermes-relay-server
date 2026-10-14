@@ -181,7 +181,14 @@ def list_conversations(request: Request, _=session_dep):
 
 @router.get("/conversations/{agent_a}/{agent_b}")
 @limiter.limit(lambda: settings.rate_limit_default)
-def conversation_thread(agent_a: str, agent_b: str, request: Request, _=session_dep):
+def conversation_thread(
+    agent_a: str,
+    agent_b: str,
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _=session_dep,
+):
     conn = connect()
     try:
         ids = conn.execute(
@@ -191,6 +198,14 @@ def conversation_thread(agent_a: str, agent_b: str, request: Request, _=session_
         if len(ids) != 2:
             raise api_error(404, "NOT_FOUND", "Salah satu agent tidak ditemukan.")
         a, b = sorted(r["id"] for r in ids)
+        total = conn.execute(
+            """SELECT COUNT(*) AS n FROM messages m
+               WHERE (m.sender_id = ? AND m.recipient_id = ?)
+                  OR (m.sender_id = ? AND m.recipient_id = ?)""",
+            (a, b, b, a),
+        ).fetchone()["n"]
+        # Ambil jendela terbaru dulu (DESC + OFFSET), lalu balik ke urutan
+        # kronologis supaya UI tetap membaca lama -> baru.
         rows = conn.execute(
             """SELECT m.id, m.msg_type, m.content, m.created_at, m.reply_to,
                       s.name AS sender, r.name AS recipient,
@@ -201,9 +216,11 @@ def conversation_thread(agent_a: str, agent_b: str, request: Request, _=session_
                LEFT JOIN file_logs fl ON fl.file_id = m.file_id
                WHERE (m.sender_id = ? AND m.recipient_id = ?)
                   OR (m.sender_id = ? AND m.recipient_id = ?)
-               ORDER BY m.id""",
-            (a, b, b, a),
+               ORDER BY m.id DESC
+               LIMIT ? OFFSET ?""",
+            (a, b, b, a, limit, offset),
         ).fetchall()
+        rows = list(reversed(rows))
     finally:
         conn.close()
     return {
@@ -223,6 +240,10 @@ def conversation_thread(agent_a: str, agent_b: str, request: Request, _=session_
                 }
                 for r in rows
             ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
         },
     }
 
@@ -403,7 +424,13 @@ def list_groups(request: Request, _=session_dep):
 
 @router.get("/groups/{name}/messages")
 @limiter.limit(lambda: settings.rate_limit_default)
-def group_messages(name: str, request: Request, _=session_dep):
+def group_messages(
+    name: str,
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _=session_dep,
+):
     conn = connect()
     try:
         group = conn.execute(
@@ -411,6 +438,9 @@ def group_messages(name: str, request: Request, _=session_dep):
         ).fetchone()
         if group is None:
             raise api_error(404, "NOT_FOUND", f"Grup '{name}' tidak ditemukan.")
+        total = conn.execute(
+            "SELECT COUNT(*) AS n FROM messages WHERE group_id = ?", (group["id"],)
+        ).fetchone()["n"]
         rows = conn.execute(
             """SELECT m.id, m.msg_type, m.content, m.created_at, m.reply_to,
                       s.name AS sender, fl.file_id, fl.original_name, fl.size_bytes
@@ -418,9 +448,11 @@ def group_messages(name: str, request: Request, _=session_dep):
                JOIN agents s ON s.id = m.sender_id
                LEFT JOIN file_logs fl ON fl.file_id = m.file_id
                WHERE m.group_id = ?
-               ORDER BY m.id""",
-            (group["id"],),
+               ORDER BY m.id DESC
+               LIMIT ? OFFSET ?""",
+            (group["id"], limit, offset),
         ).fetchall()
+        rows = list(reversed(rows))
     finally:
         conn.close()
     return {
@@ -439,6 +471,10 @@ def group_messages(name: str, request: Request, _=session_dep):
                 }
                 for r in rows
             ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
         },
     }
 
@@ -458,8 +494,8 @@ def _file_info(row) -> dict | None:
     }
 
 
-def _file_rows(conn):
-    rows = conn.execute(
+def _file_rows(conn, limit: int | None = None, offset: int = 0):
+    sql = (
         """SELECT fl.file_id, fl.original_name, fl.stored_name, fl.mime_type,
                   fl.size_bytes, fl.sha256, fl.uploaded_at, fl.deleted_at,
                   fl.download_count,
@@ -470,8 +506,13 @@ def _file_rows(conn):
            JOIN agents u ON u.id = fl.uploader_id
            LEFT JOIN agents r ON r.id = fl.recipient_id
            LEFT JOIN groups g ON g.id = fl.group_id
-           ORDER BY fl.uploaded_at DESC"""
-    ).fetchall()
+           ORDER BY fl.uploaded_at DESC, fl.id DESC"""
+    )
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = (limit, offset)
+    rows = conn.execute(sql, params).fetchall()
     result = []
     for r in rows:
         exists = (settings.filemanager_dir / r["stored_name"]).is_file()
@@ -496,13 +537,28 @@ def _file_rows(conn):
 
 @router.get("/files")
 @limiter.limit(lambda: settings.rate_limit_default)
-def list_files(request: Request, _=session_dep):
+def list_files(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _=session_dep,
+):
     conn = connect()
     try:
-        files = _file_rows(conn)
+        total = conn.execute("SELECT COUNT(*) AS n FROM file_logs").fetchone()["n"]
+        files = _file_rows(conn, limit=limit, offset=offset)
     finally:
         conn.close()
-    return {"status": "ok", "data": {"files": files}}
+    return {
+        "status": "ok",
+        "data": {
+            "files": files,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(files) < total,
+        },
+    }
 
 
 @router.get("/files/{stored_name}/download")

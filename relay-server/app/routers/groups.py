@@ -1,8 +1,10 @@
-"""POST /groups dan POST /groups/{name}/join."""
+"""POST /groups, GET /groups, dan POST /groups/{name}/join."""
+import sqlite3
+
 from fastapi import APIRouter, Depends, Request, status
 
 from ..config import settings
-from ..database import connect
+from ..database import begin_immediate, connect
 from ..ratelimit import limiter
 from ..schemas import CreateGroupRequest
 from ..security import api_error, get_current_agent
@@ -16,10 +18,12 @@ router = APIRouter()
 def create_group(body: CreateGroupRequest, request: Request, agent=Depends(get_current_agent)):
     conn = connect()
     try:
+        begin_immediate(conn)  # cek-tulis harus atomik
         clash = conn.execute(
             "SELECT 1 FROM groups WHERE name = ? COLLATE NOCASE", (body.name,)
         ).fetchone()
         if clash:
+            conn.commit()
             raise api_error(409, "CONFLICT", f"Nama grup '{body.name}' sudah dipakai.")
 
         public_id = message_service.new_group_id(conn)
@@ -34,6 +38,12 @@ def create_group(body: CreateGroupRequest, request: Request, agent=Depends(get_c
             (row_id, agent["id"]),
         )
         conn.commit()
+    except (sqlite3.IntegrityError, sqlite3.OperationalError):
+        # Dua request bersamaan dengan nama sama: yang kedua kena UNIQUE
+        # (atau lock tulis yang tetap tertahan setelah retry).
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise api_error(409, "CONFLICT", f"Nama grup '{body.name}' sudah dipakai.")
     finally:
         conn.close()
 
@@ -80,20 +90,26 @@ def list_groups(request: Request, agent=Depends(get_current_agent)):
 def join_group(name: str, request: Request, agent=Depends(get_current_agent)):
     conn = connect()
     try:
+        begin_immediate(conn)
         row = conn.execute(
             "SELECT gm.joined_at FROM group_members gm JOIN groups g ON g.id = gm.group_id "
             "WHERE g.name = ? COLLATE NOCASE AND gm.agent_id = ?",
             (name, agent["id"]),
         ).fetchone()
         if row:
+            conn.commit()
             # Sudah anggota: operasi idempotent.
-            return {"status": "ok", "data": {"group": name, "joined_at": row["joined_at"]}}
+            return {
+                "status": "ok",
+                "data": {"group": name, "joined_at": row["joined_at"], "already_member": True},
+            }
 
         # Join berdasar nama (nama grup unik); ID dipakai untuk addressing pesan.
         group = conn.execute(
             "SELECT id FROM groups WHERE name = ? COLLATE NOCASE", (name,)
         ).fetchone()
         if group is None:
+            conn.commit()
             raise api_error(404, "NOT_FOUND", f"Grup '{name}' tidak ditemukan.")
         conn.execute(
             "INSERT INTO group_members (group_id, agent_id) VALUES (?, ?)",
@@ -104,7 +120,20 @@ def join_group(name: str, request: Request, agent=Depends(get_current_agent)):
             (group["id"], agent["id"]),
         ).fetchone()["joined_at"]
         conn.commit()
+    except sqlite3.IntegrityError:
+        # Balapan join bersamaan: yang kedua kena PRIMARY KEY -> sudah anggota.
+        conn.execute("ROLLBACK") if conn.in_transaction else None
+        row = conn.execute(
+            "SELECT gm.joined_at FROM group_members gm JOIN groups g ON g.id = gm.group_id "
+            "WHERE g.name = ? COLLATE NOCASE AND gm.agent_id = ?",
+            (name, agent["id"]),
+        ).fetchone()
+        joined_at = row["joined_at"] if row else None
+        return {
+            "status": "ok",
+            "data": {"group": name, "joined_at": joined_at, "already_member": True},
+        }
     finally:
         conn.close()
 
-    return {"status": "ok", "data": {"group": name, "joined_at": joined_at}}
+    return {"status": "ok", "data": {"group": name, "joined_at": joined_at, "already_member": False}}

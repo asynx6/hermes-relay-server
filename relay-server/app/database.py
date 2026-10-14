@@ -1,5 +1,6 @@
 """Akses SQLite: satu koneksi per operasi, WAL, foreign keys aktif."""
 import sqlite3
+import time
 from pathlib import Path
 
 from .config import settings
@@ -16,6 +17,25 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def begin_immediate(conn: sqlite3.Connection, max_attempts: int = 8) -> None:
+    """BEGIN IMMEDIATE dengan retry untuk konflik lock sesaat.
+
+    Di mode WAL, beberapa penulis bersamaan kadang mendapat
+    "database is locked" atau (pada beberapa platform/filesystem)
+    "attempt to write a readonly database" yang sebenarnya transien.
+    busy_timeout menangani kasus umum; retri ini menangani sisanya supaya
+    request balapan berakhir 409/200, bukan 500.
+    """
+    for attempt in range(max_attempts):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError:
+            if attempt == max_attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def init_db() -> None:

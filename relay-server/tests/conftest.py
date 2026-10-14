@@ -24,8 +24,14 @@ TMP_ROOT = Path(tempfile.mkdtemp(prefix="relay-test-"))
 os.environ["REGISTRATION_KEY"] = "test-registration-key"
 os.environ["DB_PATH"] = str(TMP_ROOT / "relay.db")
 os.environ["FILEMANAGER_DIR"] = str(TMP_ROOT / "filemanager")
-os.environ["RATE_LIMIT_REGISTER"] = "5/minute"
-os.environ["RATE_LIMIT_DEFAULT"] = "1000/minute"
+# Limit dilonggarkan untuk rangkaian test; tes khusus rate limit
+# menurunkan nilainya sendiri dengan bucket kunci unik.
+os.environ["RATE_LIMIT_REGISTER"] = "10000/minute"
+os.environ["RATE_LIMIT_DEFAULT"] = "100000/minute"
+os.environ["RATE_LIMIT_LOGIN"] = "10000/minute"
+# Password dashboard eksplisit untuk test (tanpa env ini, auth.py membuat
+# password acak dan mencetaknya sekali ke stdout).
+os.environ["DASHBOARD_PASSWORD"] = "123456"
 os.environ.setdefault("RETENTION_DAYS", "30")
 
 import sys
@@ -45,7 +51,12 @@ def reset_db() -> None:
         shutil.rmtree(settings.filemanager_dir)
     settings.filemanager_dir.mkdir(parents=True, exist_ok=True)
     # Sesi dashboard: password kembali ke default dan secret JWT dibuat ulang.
-    for name in ("dashboard_auth.json", "dashboard_jwt_secret"):
+    for name in (
+        "dashboard_auth.json",
+        "dashboard_jwt_secret",
+        "dashboard_jwt_epoch",
+        "server_epoch",
+    ):
         (settings.data_dir / name).unlink(missing_ok=True)
 
 
@@ -70,23 +81,24 @@ def cleanup_tmp():
     shutil.rmtree(TMP_ROOT, ignore_errors=True)
 
 
-def fresh_key() -> str:
-    """Bucket rate limit unik per test (limiter in-memory dibagi antar test)."""
-    return f"test-{uuid.uuid4()}"
-
-
-def register_agent(client, name: str, description: str | None = None) -> dict:
+def register_agent(client, name: str, description: str | None = None,
+                    registration_nonce: str | None = None) -> dict:
+    payload = {"name": name, "description": description}
+    if registration_nonce:
+        payload["registration_nonce"] = registration_nonce
     r = client.post(
         "/api/v1/register",
-        headers={"X-Registration-Key": "test-registration-key", "X-Ratelimit-Key": fresh_key()},
-        json={"name": name, "description": description},
+        headers={"X-Registration-Key": "test-registration-key"},
+        json=payload,
     )
     assert r.status_code == 201, r.text
     return r.json()["data"]
 
 
 def auth(secret: str) -> dict:
-    return {"Authorization": f"Bearer {secret}", "X-Ratelimit-Key": fresh_key()}
+    # Kunci bucket rate limit adalah hash token, bukan header khusus test,
+    # sehingga setiap agent punya bucket sendiri secara alami.
+    return {"Authorization": f"Bearer {secret}"}
 
 
 def create_group(client, secret: str, name: str, description: str | None = None) -> dict:

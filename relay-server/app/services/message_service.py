@@ -121,14 +121,75 @@ def store_message(
     group_id: int | None,
     content: str,
     reply_to: int | None,
+    msg_type: str = "text",
+    task_id: str | None = None,
+    task_status: str | None = None,
 ) -> sqlite3.Row:
     cur = conn.execute(
         """INSERT INTO messages
-             (client_msg_id, sender_id, recipient_id, group_id, msg_type, content, reply_to)
-           VALUES (?, ?, ?, ?, 'text', ?, ?)""",
-        (client_msg_id, sender_row_id, recipient_row_id, group_id, content, reply_to),
+             (client_msg_id, sender_id, recipient_id, group_id, msg_type, content,
+              reply_to, task_id, task_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            client_msg_id,
+            sender_row_id,
+            recipient_row_id,
+            group_id,
+            msg_type,
+            content,
+            reply_to,
+            task_id,
+            task_status,
+        ),
     )
     return conn.execute("SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def task_thread(
+    conn: sqlite3.Connection, task_id: str, agent_row_id: int
+) -> list[dict]:
+    """Semua pesan dengan task_id tertentu yang terlihat oleh agent ini.
+
+    Dipakai pola RPC ringan: pengirim mengirim pesan bertipe `task`
+    dengan `task_id`, penerima membalas dengan pesan bertipe `result`
+    yang membawa `task_id` yang sama. Kedua sisi bisa membaca seluruh
+    riwayat satu tugas lewat GET /tasks/{task_id}.
+    """
+    rows = conn.execute(
+        """SELECT m.id, m.msg_type, m.content, m.created_at, m.task_status,
+                  s.name AS sender_name, s.agent_id AS sender_agent_id,
+                  r.name AS recipient_name, g.name AS group_name
+           FROM messages m
+           JOIN agents s ON s.id = m.sender_id
+           LEFT JOIN agents r ON r.id = m.recipient_id
+           LEFT JOIN groups g ON g.id = m.group_id
+           WHERE m.task_id = ?
+             AND (
+                   m.sender_id = ?
+                   OR m.recipient_id = ?
+                   OR EXISTS (
+                       SELECT 1 FROM group_members gm
+                       WHERE gm.group_id = m.group_id AND gm.agent_id = ?
+                         AND m.created_at >= gm.joined_at
+                   )
+                 )
+           ORDER BY m.id""",
+        (task_id, agent_row_id, agent_row_id, agent_row_id),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "msg_type": r["msg_type"],
+            "task_status": r["task_status"],
+            "content": r["content"],
+            "from": r["sender_name"],
+            "from_id": r["sender_agent_id"],
+            "to": r["recipient_name"],
+            "group": r["group_name"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
 
 
 def fetch_messages(
@@ -141,7 +202,8 @@ def fetch_messages(
     """
     rows = conn.execute(
         """SELECT m.id, m.msg_type, m.content, m.file_id, m.created_at,
-                  m.reply_to, s.name AS sender_name, s.agent_id AS sender_agent_id,
+                  m.reply_to, m.task_id, m.task_status,
+                  s.name AS sender_name, s.agent_id AS sender_agent_id,
                   g.name AS group_name, g.group_id AS group_public_id,
                   fl.original_name, fl.size_bytes, fl.mime_type, fl.sha256
            FROM messages m
@@ -187,6 +249,8 @@ def fetch_messages(
                 "group_id": r["group_public_id"],
                 "msg_type": r["msg_type"],
                 "content": r["content"],
+                "task_id": r["task_id"],
+                "task_status": r["task_status"],
                 "file": file_info,
                 "reply_to": r["reply_to"],
                 "created_at": r["created_at"],

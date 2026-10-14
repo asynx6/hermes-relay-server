@@ -28,7 +28,7 @@ def upload(client, secret, path, target_type, target_name, target_id,
     with open(path, "rb") as f:
         return client.post(
             "/api/v1/upload-file",
-            headers={"Authorization": f"Bearer {secret}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+            headers={"Authorization": f"Bearer {secret}"},
             files={"file": (os.path.basename(path), f, "application/octet-stream")},
             data=data,
         )
@@ -130,7 +130,9 @@ def test_blocked_extension(client, tmp_path):
     # Target valid tapi ekstensi diblokir: 415. Tidak ada file tersisa.
     assert r.status_code == 415
     assert r.json()["code"] == "UNSUPPORTED_TYPE"
-    assert list(settings.filemanager_dir.iterdir()) == []
+    # Tidak ada file tersisa (direktori .staging boleh ada, harus kosong).
+    assert not [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
+    assert not list((settings.filemanager_dir / ".staging").glob("*.part"))
 
 
 def test_blocked_extension_with_valid_recipient(client, tmp_path):
@@ -152,7 +154,7 @@ def test_dangerous_filename_sanitized(client, tmp_path):
         with open(src, "rb") as f:
             r = client.post(
                 "/api/v1/upload-file",
-                headers={"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+                headers={"Authorization": f"Bearer {a['secret_key']}"},
                 files={"file": (dangerous, f, "application/octet-stream")},
                 data={
                     "target_type": "direct",
@@ -190,7 +192,8 @@ def test_upload_over_limit_rejected_no_leftover(client, tmp_path, monkeypatch):
     r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
     assert r.status_code == 413
     assert r.json()["code"] == "FILE_TOO_LARGE"
-    assert list(settings.filemanager_dir.iterdir()) == []
+    assert not [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
+    assert not list((settings.filemanager_dir / ".staging").glob("*.part"))
 
     # Tidak ada pesan yang tersimpan.
     assert fetch(client, b["secret_key"])["messages"] == []
@@ -295,7 +298,7 @@ def test_png_upload_content_type(client, tmp_path):
     with open(src, "rb") as f:
         r = client.post(
             "/api/v1/upload-file",
-            headers={"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+            headers={"Authorization": f"Bearer {a['secret_key']}"},
             files={"file": ("pixel.png", f, "image/png")},
             data={
                 "target_type": "direct",

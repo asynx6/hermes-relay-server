@@ -1,4 +1,6 @@
 """Aplikasi FastAPI: Hermes Relay Server."""
+import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,11 +19,27 @@ from .routers import files, groups, messages, register
 API_PREFIX = "/api/v1"
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard" / "static"
 
+logger = logging.getLogger("hermes.relay")
+
+WEAK_REGISTRATION_KEYS = {"", "change-me-in-env", "change-me", "ganti-dengan-string-acak-panjang"}
+
+
+def check_security_defaults() -> None:
+    """Tolak start kalau kredensial masih default pendekatan 'ganti saya'."""
+    if settings.registration_key.strip().lower() in WEAK_REGISTRATION_KEYS:
+        raise SystemExit(
+            "REFUSING TO START: REGISTRATION_KEY masih nilai default.\n"
+            "Set REGISTRATION_KEY di .env dengan string acak panjang, contoh:\n"
+            "  python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    check_security_defaults()
     init_db()
     settings.filemanager_dir.mkdir(parents=True, exist_ok=True)
+    (settings.filemanager_dir / ".staging").mkdir(parents=True, exist_ok=True)
     yield
 
 
@@ -61,6 +79,35 @@ def create_app() -> FastAPI:
                 "status": "error",
                 "code": "RATE_LIMITED",
                 "message": "Terlalu banyak request. Coba lagi nanti.",
+            },
+        )
+
+    @app.exception_handler(sqlite3.IntegrityError)
+    async def integrity_handler(request: Request, exc: sqlite3.IntegrityError):
+        # Jaring pengaman: endpoint yang mengecek-lalu-INSERT tanpa transaksi
+        # bisa kena UNIQUE saat dua request bersamaan. Endpoint endpoint itu
+        # menangani IntegrityError sendiri; ini fallback agar tidak jadi 500.
+        logger.warning("IntegrityError di %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "error",
+                "code": "CONFLICT",
+                "message": "Data sudah ada (kemungkinan request bersamaan).",
+            },
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_handler(request: Request, exc: Exception):
+        # Semua error tak terduga tetap memakai envelope error, bukan HTML
+        # 500 mentah yang membuat client gagal parse JSON.
+        logger.exception("Error tak tertangani di %s", request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "code": "INTERNAL_ERROR",
+                "message": "Kesalahan server tak terduga.",
             },
         )
 

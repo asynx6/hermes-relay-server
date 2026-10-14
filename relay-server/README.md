@@ -52,11 +52,21 @@ membutuhkan header `Authorization: Bearer <secret_key>`.
 | POST | `/upload-file` | Unggah file; otomatis jadi pesan bertipe `file` |
 | GET | `/files` | Daftar file yang boleh diakses agent ini (nama, ID, ukuran), dengan paginasi |
 | GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, batas `limit` maks 100) |
+| POST | `/ack` | Konfirmasi pesan diterima/dibaca (receipt pengirim bisa dilihat di `/receipts`) |
+| GET | `/receipts` | Status penerimaan pesan yang dikirim agent ini |
+| GET | `/tasks/{task_id}` | Riwayat satu tugas (pesan `task` + `result`) |
 | GET | `/download-file/<file_id>` | Unduh file (stream, cek otorisasi) |
 | POST | `/groups` | Buat grup; pembuat otomatis jadi anggota |
 | GET | `/groups` | Direktori: semua grup + status keanggotaan pemanggil |
 | POST | `/groups/{name}/join` | Gabung ke grup |
 | GET | `/health` | Health check tanpa auth |
+
+**Pola task/RPC ringan.** `send-message` menerima `msg_type` (`text`, `file`,
+`task`, `result`, `event`) dan `task_id`. Pengirim mengirim `task` dengan
+`task_id` + `task_status: pending`; penerima membalas `result` dengan
+`task_id` yang sama. Riwayat lengkap satu tugas bisa dibaca kedua sisi lewat
+`GET /tasks/{task_id}`. `task_id` wajib untuk `task`/`result` dan dilarang untuk
+tipe lain (validasi Pydantic).
 
 **Alamat pesan selalu pasangan (ID, nama).** Setiap pengiriman — pesan teks
 maupun file — memakai `target_id` + `target_name`:
@@ -128,13 +138,13 @@ kecuali `/login` dan `/logout`):
 | POST | `/change-password` | Ganti password dashboard |
 | GET | `/agents` | Daftar semua agent |
 | GET | `/conversations` | Daftar pasangan agent yang pernah berchat privat |
-| GET | `/conversations/{a}/{b}` | Riwayat chat privat dua agent |
+| GET | `/conversations/{a}/{b}` | Riwayat chat privat dua agent (paginasi `limit`/`offset`) |
 | POST | `/send-message` | Kirim pesan sebagai agent pilihan (`as_agent`) |
 | POST | `/groups` | Buat grup; pembuat (`as_agent`) otomatis jadi anggota |
 | POST | `/groups/{name}/join` | Gabungkan agent ke grup |
 | GET | `/groups` | Daftar grup + anggota |
-| GET | `/groups/{name}/messages` | Riwayat pesan grup |
-| GET | `/files` | Daftar file di `filemanager/` beserta metadata |
+| GET | `/groups/{name}/messages` | Riwayat pesan grup (paginasi `limit`/`offset`) |
+| GET | `/files` | Daftar file di `filemanager/` beserta metadata (paginasi `limit`/`offset`) |
 | GET | `/files/{stored_name}/download` | Unduh file |
 | DELETE | `/files/{stored_name}` | Hapus file (disk + `deleted_at`) |
 
@@ -254,12 +264,31 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 
 ## Keamanan
 
+- **Tolak start kalau kredensial masih default.** Saat startup, server keluar
+  dengan pesan jelas kalau `REGISTRATION_KEY` masih nilai contoh. Password
+  dashboard: kalau `DASHBOARD_PASSWORD` tidak di-set di environment dan belum
+  ada file auth, server membuat password acak dan **mencetaknya sekali** ke
+  stdout (hanya hash-nya yang disimpan). Set `DASHBOARD_PASSWORD` untuk
+  memakai password pilihan sendiri.
+- **Rate limit berkunci token, bukan IP.** Endpoint ber-Authorization dibatasi
+  per hash token; hanya endpoint publik (`/register`, login dashboard) yang
+  memakai IP. Ini penting di belakang reverse proxy: semua agent tampak sebagai
+  satu IP proxy, jadi bucket per-IP akan dibagi bersama dan mudah habis.
+  Header `X-Ratelimit-Key` dari client **tidak** diperhatikan. Untuk beberapa
+  worker uvicorn, ganti storage limiter ke Redis (counter in-memory per proses).
 - HTTPS wajib di depan server. Token dikirim di header; tanpa TLS token bisa disadap.
   Caddy (Let's Encrypt otomatis) atau Nginx + certbot.
 - Batas ukuran juga dipasang di reverse proxy sebagai pertahanan pertama.
   Nginx: `client_max_body_size 25m;`. Caddy: `request_body { max_size 25MB }`.
+  Penting: FastAPI mem-parse body multipart sebelum endpoint berjalan, jadi
+  batas proxy adalah satu-satunya pertahanan terhadap unggahan raksasa dari
+  pihak tanpa auth.
+- Jalankan uvicorn dengan `--proxy-headers --forwarded-allow-ips=127.0.0.1`
+  supaya `X-Forwarded-For` dari proxy dipercaya (memperbaiki pencatatan IP asli).
 - Server hanya menyimpan SHA-256 dari secret; secret asli muncul sekali di registrasi.
-  Secret tidak pernah ditulis ke log.
+  Secret tidak pernah ditulis ke log. Password dashboard: PBKDF2 200k iterasi.
+- Sesi dashboard memakai JWT ber-epoch: mengganti password menaikkan epoch dan
+  langsung membatalkan semua sesi lama.
 - Nama file dari client tidak pernah jadi path. File disimpan sebagai
   `<uuid4>.<ext>` di `filemanager/` (permission `0700`, di luar web root),
   dan hanya dilayani lewat `download-file` dengan cek otorisasi.
@@ -273,13 +302,20 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 111 tes lulus (13 auth, 18 messages, 20 files, 13 konkurensi
-unggahan, 28 dashboard, 5 direktori, 14 integrasi — termasuk tes beban).
+Hasil terakhir: 138 tes lulus (13 auth, 18 messages, 20 files, 20 hardening,
+13 konkurensi unggahan, 30 dashboard, 5 direktori, 5 safe_text, 14 integrasi
+— termasuk tes beban).
 
 Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan
 client Hermes asli. Skenario beban: 10 agent, 1.350 pesan burst,
 p50 360 ms, p95 488 ms, maks 958 ms. Latensi kirim didominasi commit SQLite
 outbox di sisi client, bukan oleh server.
+
+Tes `test_hardening.py` mengunci perbaikan hasil review: rate limit mengabaikan
+header client, registrasi idempotent via nonce, balapan registrasi/buat grup
+menghasilkan 409 (bukan 500), anggota grup baru tidak melihat file lama,
+file `MZ...ftyp` tetap ditolak sebagai eksekusi, ganti password membatalkan
+sesi JWT, dan `cleanup.py` aman terhadap rantai `reply_to`.
 
 ## Struktur
 
@@ -300,3 +336,26 @@ relay-server/
 ├── schema.sql
 └── requirements.txt
 ```
+
+## Roadmap (belum diimplementasikan)
+
+Dari hasil review, fitur berikut sudah dirancang tapi belum dibangun:
+
+| Fitur | Status | Catatan |
+|-------|--------|---------|
+| Long polling / SSE opsional | Belum | Latensi turun ke hampir instan; butuh server async penuh |
+| Kelola grup (leave, kick, daftar anggota, role admin, `join_code`, mention) | Belum | `GET /groups` + join sudah ada; manajemen lanjutan belum |
+| Rotasi token, scope per token, audit log kirim-sebagai-agent | Belum | Audit log untuk aksi dashboard |
+| Enkripsi end-to-end isi pesan/file | Belum | Kalau server tidak sepenuhnya dipercaya |
+| Chunked/resumable upload + dedupe SHA-256 | Belum | Untuk file jauh di atas 25 MB |
+| Docker + compose + Caddy, unit systemd, migrasi skema Alembic, backup otomatis, `/health` cek DB, metrik Prometheus | Belum | `CREATE TABLE IF NOT EXISTS` tidak bisa mengubah skema; untuk sekarang ganti skema = hapus DB dev + init ulang |
+| Adapter LLM di `handlers.py` (template API kompatibel OpenAI + penjaga prompt injection) | Belum | Client |
+
+Catatan batasan yang diketahui:
+
+- Limiter slowapi memakai counter in-memory per proses; beberapa worker uvicorn
+  butuh storage bersama (Redis) agar limit global benar-benar konsisten.
+- Unggahan dari pihak tanpa auth tetap di-parse Starlette sebelum endpoint
+  berjalan; batas di reverse proxy adalah pertahanan utamanya.
+- `config.json` client sengaja tidak di-track git (memuat `secret_key`);
+  pakai `config.example.json` sebagai templat.

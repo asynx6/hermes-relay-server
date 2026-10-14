@@ -1,8 +1,14 @@
-ding/
-*.pyc
-__pycache__/
+# Data runtime agent (DB lokal, unduhan, instance lock)
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/hermes.lock
 downloads/*
 !downloads/.gitkeep
+
+# config.json memuat secret_key — JANGAN di-commit.
+# Salin config.example.json menjadi config.json, lalu isi nilainya.
+config.json
+
+*.pyc
+__pycache__/

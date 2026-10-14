@@ -100,14 +100,20 @@ def safe_extension(original: str) -> str:
 
 
 def sniff_content(head: bytes) -> tuple[str | None, bool, str]:
-    """Deteksi tipe dari magic bytes. Kembalikan (mime, is_executable, catatan)."""
+    """Deteksi tipe dari magic bytes. Kembalikan (mime, is_executable, catatan).
+
+    Urutan penting: daftar magic dicek LEBIH DULU, dan container ISO-BMFF
+    (`....ftyp`, dipakai MP4/MOV) hanya dicek kalau tidak ada signature
+    executable yang cocok. Kalau urutan dibalik, file `MZ....ftyp...` bisa
+    lolos sebagai video.
+    """
     if not head:
         return None, False, "empty"
-    if head[:4] == b"\x00\x00\x00" or b"ftyp" in head[:12]:
-        return "video/mp4", False, "isobmff"
     for magic, mime, is_exec in MAGIC_SIGNATURES:
         if head.startswith(magic):
             return mime, is_exec, "magic"
+    if head[4:8] == b"ftyp":
+        return "video/mp4", False, "isobmff"
     # Teks (semua byte printable / whitespace)?
     if all(b < 128 and (b in (9, 10, 13) or 32 <= b < 127) for b in head):
         return "text/plain", False, "text"
@@ -238,7 +244,9 @@ def discard(path: Path | None) -> None:
 
 
 def check_download_permission(conn, file_row, agent_row_id: int) -> None:
-    """Hanya uploader, penerima direct, atau anggota grup tujuan yang boleh mengunduh."""
+    """Hanya uploader, penerima direct, atau anggota grup tujuan yang boleh
+    mengunduh. Anggota grup hanya boleh mengunduh file yang diunggah
+    SETELAH ia bergabung — aturan yang sama dengan filter pesan grup."""
     if file_row is None:
         raise api_error(404, "NOT_FOUND", "File tidak ditemukan.")
     if file_row["deleted_at"]:
@@ -246,8 +254,9 @@ def check_download_permission(conn, file_row, agent_row_id: int) -> None:
     allowed = file_row["uploader_id"] == agent_row_id or file_row["recipient_id"] == agent_row_id
     if not allowed and file_row["group_id"] is not None:
         member = conn.execute(
-            "SELECT 1 FROM group_members WHERE group_id = ? AND agent_id = ?",
-            (file_row["group_id"], agent_row_id),
+            "SELECT 1 FROM group_members WHERE group_id = ? AND agent_id = ? "
+            "AND ? >= joined_at",
+            (file_row["group_id"], agent_row_id, file_row["uploaded_at"]),
         ).fetchone()
         allowed = member is not None
     if not allowed:

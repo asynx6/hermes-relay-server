@@ -1,4 +1,5 @@
 """Konfigurasi server dari environment / file .env."""
+import secrets
 from pathlib import Path
 
 from pydantic import Field
@@ -32,6 +33,18 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         return self.db_path.parent
+
+    @property
+    def server_epoch(self) -> str:
+        """Identitas instance database. Client menyimpannya; kalau berubah
+        (DB di-reset), cursor since_id lama tidak bisa dipercaya lagi."""
+        path = self.data_dir / "server_epoch"
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        epoch = secrets.token_hex(8)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(epoch, encoding="utf-8")
+        return epoch
 
     @property
     def max_upload_bytes(self) -> int:

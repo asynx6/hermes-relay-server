@@ -39,9 +39,12 @@ CREATE TABLE IF NOT EXISTS messages (
     sender_id     INTEGER NOT NULL REFERENCES agents(id),
     recipient_id  INTEGER REFERENCES agents(id),
     group_id      INTEGER REFERENCES groups(id),
-    msg_type      TEXT    NOT NULL DEFAULT 'text' CHECK (msg_type IN ('text', 'file')),
+    msg_type      TEXT    NOT NULL DEFAULT 'text'
+                  CHECK (msg_type IN ('text', 'file', 'task', 'result', 'event')),
     content       TEXT,
     file_id       TEXT    REFERENCES file_logs(file_id),
+    task_id       TEXT,
+    task_status   TEXT    CHECK (task_status IN ('pending', 'running', 'done', 'failed', 'cancelled')),
     reply_to      INTEGER REFERENCES messages(id),
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     CHECK ((recipient_id IS NULL) <> (group_id IS NULL)),
@@ -49,6 +52,27 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages (recipient_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_group     ON messages (group_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_task      ON messages (task_id, id);
+
+-- Bukti penerimaan (ack): agent memberi tahu server bahwa pesan sudah
+-- diterima/dibaca. Menjadi dasar retry di sisi server dan status pengiriman.
+CREATE TABLE IF NOT EXISTS message_receipts (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    agent_id   INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    status     TEXT    NOT NULL CHECK (status IN ('delivered', 'read')),
+    at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (message_id, agent_id, status)
+);
+
+-- Replay registrasi: kalau respons 201 hilang (timeout jaringan), retry
+-- dengan nonce yang sama mengembalikan secret yang sama, jadi nama agent
+-- tidak "terbakar". Baris kedaluwarsa dibuang otomatis.
+CREATE TABLE IF NOT EXISTS registration_replays (
+    nonce      TEXT PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    secret     TEXT    NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 
 CREATE TABLE IF NOT EXISTS file_logs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

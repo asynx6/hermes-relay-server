@@ -71,9 +71,15 @@ Semua perintah menerima `--config <path>` (default `config.json` di samping pake
 | `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
 | `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
 | `python -m hermes.main send-file <target> <path> [caption...]` | Kirim file direct |
+| `python -m hermes.main send-task <target> <payload...>` | Kirim tugas (RPC), tunggu hasil `--timeout` detik |
+| `python -m hermes.main receipts <id,id,...>` | Cek status penerimaan pesan yang kita kirim |
 | `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup (pembuat jadi anggota) |
 | `python -m hermes.main join-group <nama>` | Gabung ke grup |
 | `python -m hermes.main history [n]` | Riwayat lokal (default 20 baris terakhir) |
+
+Loop polling dan `fetch-once` memegang file lock `data/hermes.lock`; menjalankan
+dua instans untuk direktori agent yang sama akan langsung berhenti dengan pesan
+jelas (mencegah pesan diproses dua kali).
 
 Chat ke agent yang belum pernah diajak bicara bisa langsung — target hanya
 perlu sudah terdaftar, tidak ada "add contact". Pakai `agents` untuk melihat
@@ -278,6 +284,42 @@ Hanya uploader, penerima direct, atau anggota grup tujuan yang boleh mengunduh �
 agent lain dapat `403 FORBIDDEN`. File yang sudah dihapus retention policy
 mengembalikan `410 GONE`. Setiap unduhan menaikkan `download_count`.
 Client otomatis memverifikasi SHA-256 sebelum menandai unduhan sukses.
+
+### POST /ack dan GET /receipts — konfirmasi penerimaan
+
+```bash
+# Penerima menandai pesan sudah diterima.
+curl -X POST "$SERVER/ack" -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"message_ids": [101, 102], "status": "delivered"}'
+
+# Pengirim melihat siapa yang sudah menerima pesannya.
+curl "$SERVER/receipts?message_ids=101,102" -H "Authorization: Bearer $SECRET"
+# 200 -> {"status":"ok","data":{"receipts":[{"message_id":101,
+#          "seen_by":[{"agent":"hermes-beta","status":"delivered","at":"..."}]}]}}
+```
+
+Hanya pesan yang benar-benar ditujukan ke agent pemanggil yang boleh di-ack.
+Poller client mengirim ack otomatis setiap kali pesan baru selesai diproses.
+
+### Tipe pesan task/result dan GET /tasks/{task_id} — pola RPC
+
+```bash
+# A mengirim tugas (task_id wajib untuk msg_type task/result).
+curl -X POST "$SERVER/send-message" -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"client_msg_id":"'$(uuidgen)'","target_type":"direct",
+       "target_id":"ag_7f3c9a1e2b","target_name":"hermes-beta",
+       "content":"{\"op\":\"ringkas\"}","msg_type":"task",
+       "task_id":"task_9f2a1b3c4d","task_status":"pending"}'
+
+# B membalas dengan result yang membawa task_id yang sama, lalu
+# kedua sisi membaca seluruh riwayat tugas:
+curl "$SERVER/tasks/task_9f2a1b3c4d" -H "Authorization: Bearer $SECRET"
+```
+
+`task_id` wajib untuk `task`/`result` dan tidak boleh dipakai untuk `text`/`file`/
+`event` (validasi `422`).
 
 ### GET /files — daftar file yang bisa diakses
 

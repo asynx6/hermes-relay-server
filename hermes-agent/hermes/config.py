@@ -36,17 +36,26 @@ class ClientConfig:
         self.poll_max_seconds: float = float(merged["poll_max_seconds"])
         self.download_dir: str = merged["download_dir"]
         self.max_upload_mb: int = int(merged["max_upload_mb"])
+        self.registration_nonce: str = merged.get("registration_nonce", "")
 
     @property
     def registered(self) -> bool:
         return bool(self.secret_key)
 
-    def save_registration(self, secret_key: str) -> None:
-        """Simpan secret dan buang registration_key (dipakai sekali)."""
+    def save_registration(self, secret_key: str, registration_nonce: str | None = None) -> None:
+        """Simpan secret dan buang registration_key (dipakai sekali).
+
+        Nonce registrasi dipertahankan sesaat: kalau secret/agent_id hilang
+        lagi (file terhapus), registrasi ulang dengan nonce yang sama akan
+        memutar secret yang sama dari server.
+        """
+        if registration_nonce:
+            self.registration_nonce = registration_nonce
         data = {
             "server_url": self.server_url,
             "agent_name": self.agent_name,
             "secret_key": secret_key,
+            "registration_nonce": self.registration_nonce,
             "poll_min_seconds": self.poll_min_seconds,
             "poll_max_seconds": self.poll_max_seconds,
             "download_dir": self.download_dir,
@@ -64,6 +73,7 @@ class ClientConfig:
             "registration_key": self.registration_key,
             "agent_name": self.agent_name,
             "secret_key": self.secret_key,
+            "registration_nonce": self.registration_nonce,
             "poll_min_seconds": self.poll_min_seconds,
             "poll_max_seconds": self.poll_max_seconds,
             "download_dir": self.download_dir,

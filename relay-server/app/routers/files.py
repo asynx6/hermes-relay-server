@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import settings
-from ..database import connect
+from ..database import begin_immediate, connect
 from ..ratelimit import limiter
 from ..schemas import PUBLIC_ID_PATTERN, UUID4_PATTERN
 from ..security import api_error, get_current_agent
@@ -27,8 +27,11 @@ FILES_SELECT = """
             fl.uploader_id = :me
             OR fl.recipient_id = :me
             OR EXISTS (
+                -- Anggota grup hanya melihat file yang diunggah setelah
+                -- ia bergabung (aturan yang sama dengan pesan grup).
                 SELECT 1 FROM group_members gm
                 WHERE gm.group_id = fl.group_id AND gm.agent_id = :me
+                  AND fl.uploaded_at >= gm.joined_at
             )
           )
 """
@@ -94,8 +97,13 @@ async def upload_file(
         raise api_error(400, "BAD_REQUEST", "target_type harus 'direct' atau 'group'.")
 
     content_length = request.headers.get("content-length")
-    if content_length is not None and int(content_length) > settings.max_upload_bytes:
-        raise api_error(413, "FILE_TOO_LARGE", "Melebihi batas ukuran unggahan.")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            raise api_error(400, "BAD_REQUEST", "Content-Length tidak valid.")
+        if declared > settings.max_upload_bytes:
+            raise api_error(413, "FILE_TOO_LARGE", "Melebihi batas ukuran unggahan.")
 
     original_name = file_service.sanitize_filename(file.filename or "file")
     ext = file_service.safe_extension(original_name)  # 415 sebelum body dibaca

@@ -1,14 +1,24 @@
-"""Loop polling adaptif: flush outbox, ambil pesan, unduh file.
+"""Loop polling adaptif: flush outbox, ambil pesan, unduh file, ack.
 
 Interval:
 - ada pesan baru  -> kembali ke POLL_MIN
 - tidak ada pesan -> naik x1.5 sampai POLL_MAX
 - server mati     -> naik x2 (backoff), coba lagi
+
+Ketahanan:
+- Handler `on_message` dijalankan per pesan dalam try/except; satu pesan
+  yang bikin handler error tidak boleh mematikan loop.
+- Kegagalan sementara saat flush outbox menghentikan siklus flush (bukan
+  retry tanpa henti) dan pesan tetap `pending` untuk siklus berikutnya.
+- Unduhan file yang gagal karena jaringan ditandai `pending` dan diulang
+  otomatis setiap siklus.
+- Setelah pesan diproses, agent mengirim ack ke server (endpoint /ack).
 """
 import threading
 import uuid
 
 from .api_client import AuthRejected, RelayUnavailable
+from .file_handler import RETRYABLE
 from .handlers import on_message
 
 
@@ -28,32 +38,21 @@ class Poller:
     # ---- outbox ----
 
     def flush_outbox(self) -> None:
-        """Kirim ulang pesan pending. Gagal sementara -> retry_count naik;
-        lewat batas -> failed permanen."""
+        """Kirim ulang pesan pending.
+
+        Server mati -> berhenti dari siklus ini (break), JANGAN retry tiap
+        pesan sampai puluhan detik lalu menandainya gagal. Error permanen
+        (mis. target tidak ada) tetap ditandai failed agar tidak mengulang
+        selamanya.
+        """
         for row in self.memory.pending_outbox():
             peer_id = row["peer_id"]
             if peer_id is None:
-                # Baris lama (sebelum addressing ID+nama): resolve ulang lewat direktori.
-                try:
-                    if row["scope"] == "group":
-                        match = next(
-                            (g for g in self.api.list_groups()
-                             if g["name"].lower() == row["peer"].lower()),
-                            None,
-                        )
-                    else:
-                        match = next(
-                            (a for a in self.api.list_agents()
-                             if a["name"].lower() == row["peer"].lower()),
-                            None,
-                        )
-                except Exception:
+                # Baris lama (sebelum addressing ID+nama): resolve ulang.
+                peer_id = self._resolve_peer(row["scope"], row["peer"])
+                if peer_id is None:
                     self.memory.mark_failed(row["id"])
                     continue
-                if match is None:
-                    self.memory.mark_failed(row["id"])
-                    continue
-                peer_id = match.get("group_id") or match.get("agent_id")
 
             try:
                 data = self.api.send_message(
@@ -66,44 +65,125 @@ class Poller:
                 self.memory.mark_sent(row["id"], data["message_id"])
             except AuthRejected:
                 raise
+            except RelayUnavailable:
+                # Server tidak bisa dijangkau: sisakan sisanya untuk siklus
+                # berikutnya, jangan bakar retry_count.
+                break
+            except RETRYABLE:
+                break
             except Exception:
                 self.memory.mark_failed(row["id"])
 
+    def _resolve_peer(self, scope: str, name: str) -> str | None:
+        try:
+            if scope == "group":
+                match = next(
+                    (g for g in self.api.list_groups()
+                     if g["name"].lower() == name.lower()),
+                    None,
+                )
+            else:
+                match = next(
+                    (a for a in self.api.list_agents()
+                     if a["name"].lower() == name.lower()),
+                    None,
+                )
+        except Exception:
+            return None
+        if match is None:
+            return None
+        return match.get("group_id") or match.get("agent_id")
+
     # ---- pesan masuk ----
 
-    def _handle_incoming(self, messages: list[dict]) -> None:
+    def _handle_incoming(self, messages: list[dict]) -> list[int]:
+        """Proses pesan baru; satu handler yang error tidak menghentikan
+        yang lain. Kembalikan daftar id pesan yang sudah diproses (untuk ack)."""
+        processed: list[int] = []
         for msg in messages:
-            if msg["msg_type"] == "file" and msg.get("file"):
-                try:
-                    dest = self.file_handler.download(self.api, msg, self.memory)
-                    print(f"File tersimpan: {dest}", flush=True)
-                except Exception as exc:
-                    print(f"Gagal unduh file {msg['file']['file_id']}: {exc}", flush=True)
-            self.on_message(msg)
+            try:
+                if msg["msg_type"] == "file" and msg.get("file"):
+                    try:
+                        dest = self.file_handler.download(self.api, msg, self.memory)
+                        print(f"File tersimpan: {dest}", flush=True)
+                    except RETRYABLE:
+                        print(
+                            f"Unduhan file {msg['file']['file_id']} tertunda, "
+                            "dicoba lagi nanti.",
+                            flush=True,
+                        )
+                self.on_message(msg)
+                processed.append(msg["id"])
+            except Exception as exc:
+                # Loop harus hidup; catat dan lanjut ke pesan berikutnya.
+                print(f"Handler error untuk pesan #{msg.get('id')}: {exc!r}", flush=True)
+        return processed
+
+    def _ack(self, message_ids: list[int]) -> None:
+        if not message_ids:
+            return
+        try:
+            self.api.ack(message_ids)
+        except Exception:
+            pass  # ack adalah optimasi status; gagal bukan masalah fatal
 
     # ---- loop utama ----
 
     def poll_once(self) -> tuple[bool, bool]:
-        """Satu siklus kerja: flush outbox lalu fetch.
+        """Satu siklus kerja: flush outbox, retry unduhan, fetch, proses.
 
         Mengembalikan (server_merespons, masih_ada_pesan).
         """
         try:
             self.flush_outbox()
-            data = self.api.fetch_messages(
-                since_id=self.memory.get_last_id(), limit=50
-            )
+        except AuthRejected as exc:
+            print(str(exc), flush=True)
+            self.auth_rejected = True
+            return False, False
+        except Exception as exc:
+            # Jangan mati karena satu siklus flush yang error.
+            print(f"flush_outbox error: {exc!r}", flush=True)
+
+        try:
+            self.file_handler.retry_pending(self.api, self.memory)
+        except Exception:
+            pass
+
+        try:
+            data = self.api.fetch_messages(since_id=self.memory.get_last_id(), limit=50)
         except AuthRejected as exc:
             print(str(exc), flush=True)
             self.auth_rejected = True
             return False, False
         except RelayUnavailable:
             return False, False
+        except Exception as exc:
+            # Termasuk JSONDecodeError dari respons non-JSON (mis. halaman
+            # error proxy). Loop tetap hidup.
+            print(f"fetch_messages error: {exc!r}", flush=True)
+            return False, False
+
+        # Cursor tidak lagi valid kalau DB server di-reset.
+        epoch = data.get("server_epoch")
+        if epoch and not self.memory.server_epoch_matches(epoch):
+            print(
+                "PERINGATAN: server_epoch berubah - database server tampaknya "
+                "di-reset. Cursor pesan lama mungkin tidak valid lagi.",
+                flush=True,
+            )
+        if epoch:
+            self.memory.server_epoch = epoch
+            self.memory.remember_server_epoch(epoch)
 
         messages = data["messages"]
         if messages:
-            self.memory.save_incoming(messages, data["next_since_id"])
-            self._handle_incoming(messages)
+            try:
+                new_messages = self.memory.save_incoming(messages, data["next_since_id"])
+            except Exception as exc:
+                print(f"save_incoming error: {exc!r}", flush=True)
+                return True, False
+            processed = self._handle_incoming(new_messages)
+            self._ack(processed)
         return True, data["has_more"]
 
     def run(self) -> None:

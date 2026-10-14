@@ -22,7 +22,7 @@ def test_register_without_key(client):
 def test_register_wrong_key(client):
     r = client.post(
         "/api/v1/register",
-        headers={"X-Registration-Key": "salah", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"X-Registration-Key": "salah"},
         json={"name": "hermes-wrong"},
     )
     assert r.status_code == 401
@@ -55,7 +55,7 @@ def test_register_duplicate_name(client):
     register_agent(client, "hermes-alpha")
     r = client.post(
         "/api/v1/register",
-        headers={"X-Registration-Key": "test-registration-key", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"X-Registration-Key": "test-registration-key"},
         json={"name": "hermes-alpha"},
     )
     assert r.status_code == 409
@@ -66,7 +66,7 @@ def test_register_uppercase_name_rejected(client):
     # Regex nama hanya menerima huruf kecil; huruf besar ditolak validasi.
     r = client.post(
         "/api/v1/register",
-        headers={"X-Registration-Key": "test-registration-key", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"X-Registration-Key": "test-registration-key"},
         json={"name": "Hermes-Alpha"},
     )
     assert r.status_code == 422
@@ -77,7 +77,7 @@ def test_register_invalid_name(client):
     for bad in ("ab", "UPPER", "-dash", "a" * 33, "sp ace"):
         r = client.post(
             "/api/v1/register",
-            headers={"X-Registration-Key": "test-registration-key", "X-Ratelimit-Key": f"k-{bad}"},
+            headers={"X-Registration-Key": "test-registration-key"},
             json={"name": bad},
         )
         assert r.status_code == 422, bad
@@ -137,22 +137,55 @@ def test_fetch_updates_last_seen(client):
 
 
 def test_register_rate_limited(client, monkeypatch):
+    """Endpoint publik dibatasi per kombinasi kunci bucket.
+
+    Kunci bucket produksi adalah hash token (endpoint ber-Authorization) atau
+    IP (endpoint publik). Untuk menguji limit register tanpa mengganggu tes
+    lain, kunci bucket dipaksa unik untuk tes ini.
+    """
+    from app.ratelimit import limiter
+
     monkeypatch.setattr("app.config.settings.rate_limit_register", "2/minute")
-    key = f"rl-{uuid.uuid4()}"
+    bucket = f"test-{uuid.uuid4()}"
+    monkeypatch.setattr(limiter, "_key_func", lambda request: bucket)
+
     statuses = []
     for i in range(3):
         r = client.post(
             "/api/v1/register",
-            headers={"X-Registration-Key": "test-registration-key", "X-Ratelimit-Key": key},
+            headers={"X-Registration-Key": "test-registration-key"},
             json={"name": f"hermes-rl{i}"},
         )
         statuses.append(r.status_code)
-    assert statuses[:2] == [201, 201]
-    assert statuses[2] == 429
-    assert client.get(
-        "/api/v1/fetch-messages",
-        headers={"X-Ratelimit-Key": key},
-    ).json()["code"]  # tetap dibatasi, tapi endpoint butuh auth dulu
-    r = client.get("/api/v1/fetch-messages", headers={"X-Ratelimit-Key": key})
-    # 401 auth diperiksa sebelum rate limit; yang penting 429 muncul di register
-    assert r.status_code in (401, 429)
+    assert statuses == [201, 201, 429]
+    assert client.post(
+        "/api/v1/register",
+        headers={"X-Registration-Key": "test-registration-key"},
+        json={"name": "hermes-rl3"},
+    ).json()["code"] == "RATE_LIMITED"
+
+
+def test_rate_limit_key_ignores_client_header(client, monkeypatch):
+    """Header X-Ratelimit-Key dari client tidak boleh mengubah bucket."""
+    monkeypatch_agent = register_agent(client, "hermes-hdr")
+    monkeypatch.setattr("app.config.settings.rate_limit_default", "2/minute")
+    h = {"Authorization": f"Bearer {monkeypatch_agent['secret_key']}"}
+
+    codes = []
+    for i in range(3):
+        r = client.get(
+            "/api/v1/agents",
+            headers={**h, "X-Ratelimit-Key": f"unik-{i}"},
+        )
+        codes.append(r.status_code)
+    # Semuanya satu bucket (kunci = hash token), jadi request ke-3 dapat 429
+    # walaupun header-nya berbeda — itulah poin perbaikan.
+    assert codes == [200, 200, 429]
+
+    # Bucket lain (token lain) tidak terpengaruh.
+    other = register_agent(client, "hermes-hdr2")
+    r = client.get(
+        "/api/v1/agents",
+        headers={"Authorization": f"Bearer {other['secret_key']}"},
+    )
+    assert r.status_code == 200

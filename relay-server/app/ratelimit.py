@@ -1,20 +1,30 @@
 """Rate limiter tunggal untuk aplikasi.
 
-Limit dibaca dari settings lewat lambda saat request datang, sehingga
-nilai limit bisa diubah tanpa membuat ulang aplikasi. Header
-X-Ratelimit-Key memisahkan bucket per klien (dipakai test agar tidak
-berbagi kuota).
+Kunci bucket:
+- Endpoint ber-token (Authorization) -> hash token, BUKAN IP. Di belakang
+  reverse proxy semua agent tampak sebagai satu IP proxy, jadi bucket per-IP
+  akan dibagi bersama dan mudah habis; per-token juga menahan satu agent
+  yang bermasalah tanpa menghukum agent lain.
+- Endpoint publik (/register, /login dashboard) -> IP, karena tidak ada
+  token. Karena di belakang proxy IP yang terlihat adalah IP proxy, batas
+  untuk endpoint publik harus longgar dan password wajib kuat.
+
+Bucket disimpan di memori proses. Untuk beberapa worker uvicorn, pindah ke
+storage Redis (lihat catatan di README).
 """
+import hashlib
+
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from .config import settings
+PUBLIC_SUFFIXES = ("/register", "/login")
 
 
 def key_func(request) -> str:
-    override = request.headers.get("x-ratelimit-key")
-    if override:
-        return override
+    path = request.url.path.rstrip("/")
+    auth = request.headers.get("authorization")
+    if auth and not path.endswith(PUBLIC_SUFFIXES):
+        return "tok:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:16]
     return get_remote_address(request)
 
 

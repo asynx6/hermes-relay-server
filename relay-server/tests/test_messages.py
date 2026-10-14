@@ -34,7 +34,7 @@ def test_send_to_unknown_agent(client):
     a = register_agent(client, "hermes-a")
     r = client.post(
         "/api/v1/send-message",
-        headers={"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"Authorization": f"Bearer {a['secret_key']}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
@@ -51,7 +51,7 @@ def test_send_to_self_rejected(client):
     a = register_agent(client, "hermes-a")
     r = client.post(
         "/api/v1/send-message",
-        headers={"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"Authorization": f"Bearer {a['secret_key']}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
@@ -68,7 +68,7 @@ def test_idempotent_retry_same_client_msg_id(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     client_msg_id = str(uuid.uuid4())
-    headers = {"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"}
+    headers = {"Authorization": f"Bearer {a['secret_key']}"}
 
     r1 = client.post(
         "/api/v1/send-message",
@@ -114,7 +114,7 @@ def test_idempotent_retry_same_client_msg_id(client):
 def test_content_length_and_uuid_validation(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
-    h = {"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"}
+    h = {"Authorization": f"Bearer {a['secret_key']}"}
 
     r = client.post(
         "/api/v1/send-message", headers=h,
@@ -188,7 +188,7 @@ def test_non_member_cannot_send_to_group(client):
     group = create_group(client, a["secret_key"], "research-team")
     r = client.post(
         "/api/v1/send-message",
-        headers={"Authorization": f"Bearer {outsider['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"Authorization": f"Bearer {outsider['secret_key']}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "group",
@@ -206,7 +206,7 @@ def test_send_with_mismatched_id_and_name(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     c = register_agent(client, "hermes-c")
-    h = {"Authorization": f"Bearer {a['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"}
+    h = {"Authorization": f"Bearer {a['secret_key']}"}
 
     # ID agent B tapi nama agent C.
     r = client.post(
@@ -371,7 +371,7 @@ def test_reply_to(client):
 
     r = client.post(
         "/api/v1/send-message",
-        headers={"Authorization": f"Bearer {b['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"Authorization": f"Bearer {b['secret_key']}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",
@@ -389,7 +389,7 @@ def test_reply_to(client):
     # reply ke pesan yang tidak ada / tidak terlihat.
     r = client.post(
         "/api/v1/send-message",
-        headers={"Authorization": f"Bearer {b['secret_key']}", "X-Ratelimit-Key": f"k-{uuid.uuid4()}"},
+        headers={"Authorization": f"Bearer {b['secret_key']}"},
         json={
             "client_msg_id": str(uuid.uuid4()),
             "target_type": "direct",

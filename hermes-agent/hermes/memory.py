@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     msg_type          TEXT    NOT NULL DEFAULT 'text',
     content           TEXT,
     file_id           TEXT,
+    task_id           TEXT,
+    task_status       TEXT,
     status            TEXT    NOT NULL DEFAULT 'sent'
                       CHECK (status IN ('pending', 'sent', 'failed', 'received')),
     retry_count       INTEGER NOT NULL DEFAULT 0,
@@ -63,6 +65,7 @@ def now_iso() -> str:
 class Memory:
     def __init__(self, db_path: str, agent_name: str):
         self.agent_name = agent_name
+        self.server_epoch = None  # diisi dari respons fetch-messages
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path, timeout=30)
         self.conn.row_factory = sqlite3.Row
@@ -93,20 +96,24 @@ class Memory:
 
     # ---- pesan masuk ----
 
-    def save_incoming(self, messages: list[dict], next_id: int) -> None:
+    def save_incoming(self, messages: list[dict], next_id: int) -> list[dict]:
         """Simpan pesan masuk lalu majukan cursor, dalam satu transaksi.
 
-        remote_message_id UNIQUE melakukan dedupe kalau server mengirim
-        ulang pesan yang sama. Cursor hanya naik setelah simpan sukses.
+        - `remote_message_id UNIQUE` men-dedupe kalau server mengirim ulang
+          pesan yang sama; hanya pesan yang BENAR-BENAR baru (rowcount > 0)
+          yang dikembalikan, supaya handler tidak jalan dua kali.
+        - Cursor hanya naik (MAX), tidak pernah mundur, dan hanya setelah
+          simpan sukses.
         """
+        new_messages: list[dict] = []
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             for msg in messages:
-                self.conn.execute(
+                cur = self.conn.execute(
                     """INSERT OR IGNORE INTO conversations
-                         (remote_message_id, direction, scope, peer, sender,
-                          msg_type, content, file_id, status, created_at)
-                       VALUES (?, 'in', ?, ?, ?, ?, ?, ?, 'received', ?)""",
+                         (remote_message_id, direction, scope, peer, peer_id, sender,
+                          msg_type, content, file_id, task_id, task_status, status, created_at)
+                       VALUES (?, 'in', ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'received', ?)""",
                     (
                         msg["id"],
                         msg["scope"],
@@ -115,18 +122,60 @@ class Memory:
                         msg["msg_type"],
                         msg.get("content"),
                         msg["file"]["file_id"] if msg.get("file") else None,
+                        msg.get("task_id"),
+                        msg.get("task_status"),
                         msg["created_at"],
                     ),
                 )
+                if cur.rowcount:
+                    new_messages.append(msg)
+            # MAX() supaya cursor tidak pernah mundur (mis. server mengirim
+            # ulang batch lama karena timeout di sisi kita).
             self.conn.execute(
                 "INSERT INTO sync_state (key, value) VALUES ('last_message_id', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "ON CONFLICT(key) DO UPDATE SET value = "
+                "MAX(CAST(value AS INTEGER), excluded.value)",
                 (str(next_id),),
+            )
+            self.conn.execute(
+                "INSERT INTO sync_state (key, value) VALUES ('server_epoch', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (self.server_epoch or "",),
             )
             self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
+        return new_messages
+
+    def server_epoch_matches(self, epoch: str | None) -> bool:
+        """False kalau server_epoch berbeda dari yang terakhir tercatat
+        (tanda database server di-reset — cursor lama tidak lagi valid)."""
+        if not epoch:
+            return True
+        row = self.conn.execute(
+            "SELECT value FROM sync_state WHERE key = 'server_epoch'"
+        ).fetchone()
+        if row is None or not row["value"]:
+            return True  # belum pernah mencatat; anggap cocok
+        return row["value"] == epoch
+
+    def remember_server_epoch(self, epoch: str | None) -> None:
+        self.conn.execute(
+            "INSERT INTO sync_state (key, value) VALUES ('server_epoch', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (epoch or "",),
+        )
+        self.conn.commit()
+
+    # ---- unduhan pending (retry tiap siklus) ----
+
+    def pending_downloads(self) -> list[sqlite3.Row]:
+        """File yang gagal/tertunda diunduh; dicoba lagi tiap siklus polling."""
+        return self.conn.execute(
+            "SELECT * FROM files_history WHERE direction = 'download' "
+            "AND status = 'pending' ORDER BY id LIMIT 20"
+        ).fetchall()
 
     # ---- outbox ----
 

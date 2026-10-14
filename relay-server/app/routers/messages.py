@@ -1,11 +1,11 @@
-"""POST /send-message dan GET /fetch-messages."""
+"""POST /send-message, GET /fetch-messages, ack, receipts, dan tasks."""
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from ..config import settings
-from ..database import connect
+from ..database import begin_immediate, connect
 from ..ratelimit import limiter
-from ..schemas import SendMessageRequest
+from ..schemas import AckRequest, SendMessageRequest
 from ..security import api_error, get_current_agent
 from ..services import message_service
 
@@ -18,7 +18,7 @@ def send_message(body: SendMessageRequest, request: Request, agent=Depends(get_c
     # Satu koneksi untuk cek duplikat + insert; transaksi membuat retry aman.
     conn = connect()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
         duplicate = message_service.find_by_client_msg_id(
             conn, agent["id"], body.client_msg_id
         )
@@ -66,6 +66,9 @@ def send_message(body: SendMessageRequest, request: Request, agent=Depends(get_c
             group_id=group_id,
             content=body.content,
             reply_to=body.reply_to,
+            msg_type=body.msg_type,
+            task_id=body.task_id,
+            task_status=body.task_status,
         )
         conn.commit()
         message_id, created_at = row["id"], row["created_at"]
@@ -81,6 +84,8 @@ def send_message(body: SendMessageRequest, request: Request, agent=Depends(get_c
                 "target_type": body.target_type,
                 "target": body.target_name,
                 "target_id": body.target_id,
+                "msg_type": body.msg_type,
+                "task_id": body.task_id,
                 "created_at": created_at,
                 "duplicate": False,
             },
@@ -117,6 +122,110 @@ def fetch_messages(
                 "messages": messages,
                 "next_since_id": next_since_id,
                 "has_more": has_more,
+                # Berubah kalau DB di-reset; client harus menyadari cursor
+                # lama tidak valid lagi kalau nilai ini berbeda.
+                "server_epoch": settings.server_epoch,
             },
         },
     )
+
+
+@router.post("/ack")
+@limiter.limit(lambda: settings.rate_limit_default)
+def ack_messages(body: AckRequest, request: Request, agent=Depends(get_current_agent)):
+    """Tandai pesan sebagai diterima/dibaca oleh agent pemanggil.
+
+    Hanya pesan yang benar-benar ditujukan ke agent ini (langsung atau lewat
+    grupnya) yang boleh di-ack; pesan milik agent lain diabaikan.
+    """
+    conn = connect()
+    try:
+        for message_id in body.message_ids:
+            visible = conn.execute(
+                """SELECT 1 FROM messages m
+                   WHERE m.id = ?
+                     AND (
+                           m.recipient_id = ?
+                           OR EXISTS (
+                               SELECT 1 FROM group_members gm
+                               WHERE gm.group_id = m.group_id AND gm.agent_id = ?
+                           )
+                         )""",
+                (message_id, agent["id"], agent["id"]),
+            ).fetchone()
+            if not visible:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO message_receipts (message_id, agent_id, status) "
+                "VALUES (?, ?, ?)",
+                (message_id, agent["id"], body.status),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "data": {"acked": len(body.message_ids), "status": body.status},
+    }
+
+
+@router.get("/receipts")
+@limiter.limit(lambda: settings.rate_limit_default)
+def receipts(
+    request: Request,
+    message_ids: str = Query(..., description="Daftar message_id dipisah koma"),
+    agent=Depends(get_current_agent),
+):
+    """Status penerimaan pesan yang dikirim agent ini (butuh daftar ID)."""
+    try:
+        ids = [int(x) for x in message_ids.split(",") if x.strip()][:100]
+    except ValueError:
+        raise api_error(400, "BAD_REQUEST", "message_ids harus berupa angka.")
+    if not ids:
+        raise api_error(400, "BAD_REQUEST", "message_ids kosong.")
+
+    placeholders = ",".join("?" * len(ids))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"""SELECT mr.message_id, mr.agent_id, a.name AS agent_name,
+                       mr.status, mr.at
+                FROM message_receipts mr
+                JOIN agents a ON a.id = mr.agent_id
+                JOIN messages m ON m.id = mr.message_id
+                WHERE mr.message_id IN ({placeholders}) AND m.sender_id = ?""",
+            (*ids, agent["id"]),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    by_message: dict[int, list[dict]] = {}
+    for r in rows:
+        by_message.setdefault(r["message_id"], []).append(
+            {"agent": r["agent_name"], "status": r["status"], "at": r["at"]}
+        )
+    return {
+        "status": "ok",
+        "data": {
+            "receipts": [
+                {"message_id": k, "seen_by": v} for k, v in by_message.items()
+            ]
+        },
+    }
+
+
+@router.get("/tasks/{task_id}")
+@limiter.limit(lambda: settings.rate_limit_default)
+def get_task(request: Request, task_id: str, agent=Depends(get_current_agent)):
+    """Riwayat satu tugas (task + result) yang terlihat oleh agent ini."""
+    conn = connect()
+    try:
+        thread = message_service.task_thread(conn, task_id, agent["id"])
+    finally:
+        conn.close()
+    if not thread:
+        raise api_error(404, "NOT_FOUND", f"Tugas '{task_id}' tidak ditemukan.")
+    return {
+        "status": "ok",
+        "data": {"task_id": task_id, "messages": thread},
+    }

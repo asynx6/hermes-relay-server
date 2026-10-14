@@ -154,6 +154,70 @@ def test_conversation_unknown_agent(client):
     assert r.status_code == 404
 
 
+def test_conversation_thread_pagination(client):
+    """Thread percakapan bisa dipaginasi; urutan tetap kronologis."""
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    for i in range(5):
+        send(client, a["secret_key"], "direct", "hermes-b", f"pesan {i}")
+
+    login(client)
+    # Halaman pertama (terbaru 2) -> pesan 3, 4 dalam urutan kronologis.
+    page1 = client.get(
+        f"{API}/conversations/hermes-a/hermes-b", params={"limit": 2, "offset": 0}
+    ).json()["data"]
+    assert [m["content"] for m in page1["messages"]] == ["pesan 3", "pesan 4"]
+    assert page1["total"] == 5
+    assert page1["has_more"] is True
+
+    # Halaman berikutnya mengambil mundur ke masa lalu.
+    page2 = client.get(
+        f"{API}/conversations/hermes-a/hermes-b", params={"limit": 2, "offset": 2}
+    ).json()["data"]
+    assert [m["content"] for m in page2["messages"]] == ["pesan 1", "pesan 2"]
+    assert page2["has_more"] is True
+
+    page3 = client.get(
+        f"{API}/conversations/hermes-a/hermes-b", params={"limit": 2, "offset": 4}
+    ).json()["data"]
+    assert [m["content"] for m in page3["messages"]] == ["pesan 0"]
+    assert page3["has_more"] is False
+
+
+def test_dashboard_files_pagination(client, tmp_path):
+    """Daftar file dashboard punya total/limit/offset/has_more."""
+    a = register_agent(client, "hermes-a")
+    b = register_agent(client, "hermes-b")
+    for i in range(3):
+        src = tmp_path / f"berkas-{i}.txt"
+        src.write_bytes(b"x" * 32)
+        with open(src, "rb") as f:
+            r = client.post(
+                "/api/v1/upload-file",
+                headers={"Authorization": f"Bearer {a['secret_key']}"},
+                files={"file": (f"berkas-{i}.txt", f, "text/plain")},
+                data={
+                    "target_type": "direct",
+                    "target_id": b["agent_id"],
+                    "target_name": "hermes-b",
+                    "client_msg_id": str(uuid.uuid4()),
+                },
+            )
+        assert r.status_code == 201, r.text
+
+    login(client)
+    page = client.get(f"{API}/files", params={"limit": 2, "offset": 0}).json()["data"]
+    assert len(page["files"]) == 2
+    assert page["total"] == 3
+    assert page["limit"] == 2
+    assert page["offset"] == 0
+    assert page["has_more"] is True
+
+    page2 = client.get(f"{API}/files", params={"limit": 2, "offset": 2}).json()["data"]
+    assert len(page2["files"]) == 1
+    assert page2["has_more"] is False
+
+
 def test_groups_and_group_messages_view(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")

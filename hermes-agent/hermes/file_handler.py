@@ -8,6 +8,9 @@ from pathlib import Path
 CHUNK = 64 * 1024
 SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
+# Kegagalan yang layak diulang di siklus polling berikutnya.
+RETRYABLE = (ConnectionError, TimeoutError)
+
 
 def safe_local_name(name: str) -> str:
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
@@ -34,18 +37,26 @@ class FileHandler:
     def _save_stream(
         self, api, file_id: str, original: str, size_expected: int | None,
         sha_expected: str | None, scope: str, peer: str, memory,
+        row_id: int | None = None,
     ) -> Path:
         """Inti unduhan: stream ke disk, verifikasi ukuran + SHA-256,
-        catat files_history. File parsial selalu dihapus kalau gagal."""
+        catat files_history (baris baru, atau perbarui baris `row_id` kalau
+        ini percobaan ulang).
+
+        Kegagalan sementara (jaringan) dicatat `pending` supaya dicoba lagi
+        di siklus berikutnya; kegagalan permanen (hash/ukuran tidak cocok)
+        dicatat `failed`. File parsial selalu dihapus.
+        """
         original = safe_local_name(original)
-        row_id = memory.record_file(
-            file_id=file_id,
-            direction="download",
-            scope=scope,
-            peer=peer,
-            original_name=original,
-            size_bytes=size_expected,
-        )
+        if row_id is None:
+            row_id = memory.record_file(
+                file_id=file_id,
+                direction="download",
+                scope=scope,
+                peer=peer,
+                original_name=original,
+                size_bytes=size_expected,
+            )
 
         dest = self._unique_dest(original)
         digest = hashlib.sha256()
@@ -58,6 +69,10 @@ class FileHandler:
                         out.write(chunk)
                         digest.update(chunk)
                         size += len(chunk)
+        except RETRYABLE:
+            dest.unlink(missing_ok=True)
+            memory.update_file_status(row_id, "pending")  # coba lagi nanti
+            raise
         except Exception:
             dest.unlink(missing_ok=True)
             memory.update_file_status(row_id, "failed")
@@ -105,3 +120,24 @@ class FileHandler:
             peer=file_meta.get("target") or file_meta.get("uploader") or "?",
             memory=memory,
         )
+
+    def retry_pending(self, api, memory) -> int:
+        """Coba lagi unduhan yang tertunda (status pending)."""
+        recovered = 0
+        for row in memory.pending_downloads():
+            try:
+                self._save_stream(
+                    api,
+                    file_id=row["file_id"],
+                    original=row["original_name"],
+                    size_expected=row["size_bytes"],
+                    sha_expected=row["sha256"],
+                    scope=row["scope"],
+                    peer=row["peer"],
+                    memory=memory,
+                    row_id=row["id"],  # perbarui baris yang sama
+                )
+                recovered += 1
+            except Exception as exc:
+                print(f"Unduhan {row['file_id']} masih gagal: {exc}", flush=True)
+        return recovered

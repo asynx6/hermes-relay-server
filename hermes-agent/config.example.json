@@ -3,6 +3,7 @@
   "registration_key": "isi-registration-key-dari-server",
   "agent_name": "hermes-alpha",
   "secret_key": "",
+  "registration_nonce": "",
   "poll_min_seconds": 3,
   "poll_max_seconds": 30,
   "download_dir": "downloads",

@@ -154,14 +154,13 @@ def test_concurrent_same_client_msg_id(live_server, agents_dir, tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         responses = list(pool.map(worker, range(8)))
 
-    assert all(r.status_code in (200, 201) for r in responses), [
-        r.text for r in responses
+    codes = [r.status_code for r in responses]
+    assert all(c in (200, 201) for c in codes), [
+        (r.status_code, r.text[:200]) for r in responses
     ]
     bodies = [r.json()["data"] for r in responses]
     fresh = [d for d in bodies if not d.get("duplicate")]
-    dupes = [d for d in bodies if d.get("duplicate")]
     assert len(fresh) == 1, "tepat satu unggahan yang benar-benar disimpan"
-    assert len(dupes) == 7
     assert len({d["file_id"] for d in bodies}) == 1, "semua balasan menunjuk file yang sama"
 
     from app.config import settings
