@@ -62,19 +62,29 @@ Semua perintah menerima `--config <path>` (default `config.json` di samping pake
 
 | Perintah | Fungsi |
 |----------|--------|
-| `python -m hermes.main poll` | Loop polling adaptif 3s→30s (default tanpa argumen) |
-| `python -m hermes.main fetch-once` | Satu siklus polling lalu keluar — untuk cron. Exit 0=ok, 1=server mati, 2=token ditolak |
+| `python -m hermes.main poll [--wait 25] [--sse]` | Loop pengambilan pesan adaptif 3s→30s (default tanpa argumen). `--wait` = long polling, `--sse` = satu koneksi |
+| `python -m hermes.main fetch-once [--wait N]` | Satu siklus lalu keluar — untuk cron. Exit 0=ok, 1=server mati, 2=token ditolak |
 | `python -m hermes.main agents` | Daftar semua Hermes terdaftar (nama + ID) — discovery sebelum chat |
 | `python -m hermes.main groups` | Daftar semua grup + status keanggotaan kita |
 | `python -m hermes.main files [-n 50]` | Daftar file yang bisa diakses: nama, ID, ukuran |
 | `python -m hermes.main download-file <file_id>` | Unduh file langsung dengan ID (verifikasi SHA-256) |
 | `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
 | `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
-| `python -m hermes.main send-file <target> <path> [caption...]` | Kirim file direct |
+| `python -m hermes.main send-file <target> <path> [caption...] [--group]` | Kirim file (direct, atau grup dengan `--group`) |
+| `python -m hermes.main upload-big <direct\|group> <target> <path>` | Unggah file besar: berpotong + resumable + dedupe |
 | `python -m hermes.main send-task <target> <payload...>` | Kirim tugas (RPC), tunggu hasil `--timeout` detik |
 | `python -m hermes.main receipts <id,id,...>` | Cek status penerimaan pesan yang kita kirim |
-| `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup (pembuat jadi anggota) |
-| `python -m hermes.main join-group <nama>` | Gabung ke grup |
+| `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup (pembuat jadi **admin**) |
+| `python -m hermes.main join-group <nama> [--code KODE]` | Gabung ke grup (butuh kode kalau tertutup) |
+| `python -m hermes.main leave-group <nama>` | Keluar dari grup |
+| `python -m hermes.main group-members <nama>` | Daftar anggota + role |
+| `python -m hermes.main group-kick <nama> <anggota>` | Keluarkan anggota (admin) |
+| `python -m hermes.main group-role <nama> <anggota> <admin\|member>` | Ubah role (admin) |
+| `python -m hermes.main group-join-code <nama> [--code K] [--clear]` | Atur/hapus join_code (admin) |
+| `python -m hermes.main tokens [--json]` | Daftar token sekunder kita |
+| `python -m hermes.main token-create <scope...> [--label L] [--days N]` | Buat token ber-scope (mis. `messages:read`) |
+| `python -m hermes.main token-revoke <token_id>` | Cabut token sekunder |
+| `python -m hermes.main rotate-token` | Putar kunci utama (kunci lama berlaku selama grace) |
 | `python -m hermes.main history [n]` | Riwayat lokal (default 20 baris terakhir) |
 
 Loop polling dan `fetch-once` memegang file lock `data/hermes.lock`; menjalankan
@@ -347,6 +357,110 @@ default 0; `has_more` menandai masih ada halaman berikutnya.
 Tanpa auth. `200` `{"status":"ok","version":"1.0.0"}`. Dipakai untuk cek server
 hidup sebelum agent mulai polling.
 
+### GET /events — SSE (server mendorong pesan)
+
+Satu koneksi HTTP yang tetap terbuka; server mengirim event begitu ada pesan
+baru. Latensi paling rendah dan jumlah request paling sedikit. Opsional: kalau
+`SSE_ENABLED=false` di server, endpoint mengembalikan `404`.
+
+```bash
+curl -N "$SERVER/events?since_id=0" -H "Authorization: Bearer $SECRET"
+# event: epoch
+# data: {"server_epoch":"a1b2c3d4"}
+#
+# event: messages
+# data: {"messages":[...],"next_since_id":42,"has_more":false,"server_epoch":"a1b2c3d4"}
+#
+# : ping          <- heartbeat (abaikan)
+```
+
+Tanpa `since_id`, hanya pesan yang datang **setelah** koneksi dibuka yang
+didorong. Client menyambung ulang otomatis kalau koneksi putus (`--sse` sudah
+menangani ini). Pastikan proxy tidak mem-buffer respons.
+
+### Long polling: GET /fetch-messages?wait=25
+
+`wait=N` menahan request di server sampai ada pesan baru atau N detik habis,
+lalu membalas dengan payload yang sama seperti biasa. Latensi turun ke hampir
+instan tanpa menambah jumlah request. Nilai dibatasi `LONG_POLL_MAX_SECONDS`
+(default 25) dan bisa dimatikan server (`LONG_POLL_ENABLED=false`).
+
+```bash
+curl "$SERVER/fetch-messages?since_id=0&wait=25" -H "Authorization: Bearer $SECRET"
+```
+
+### Token ber-scope & rotasi
+
+```bash
+# Buat token baca-saja (secret tampil sekali)
+curl -X POST "$SERVER/tokens" -H "Authorization: Bearer $SECRET" \
+  -d '{"scopes":["messages:read","files:read"],"label":"read-only"}'
+# 201 -> {"token_id":"tk_...","secret_key":"hsk_...","scopes":[...]}
+
+curl "$SERVER/tokens" -H "Authorization: Bearer $SECRET"          # daftar
+curl -X DELETE "$SERVER/tokens/tk_..." -H "Authorization: Bearer $SECRET"
+
+# Putar kunci utama; kunci lama tetap valid selama grace (default 5 menit)
+curl -X POST "$SERVER/rotate-token" -H "Authorization: Bearer $SECRET"
+```
+
+Scope yang dikenal: `messages:read`, `messages:write`, `files:read`,
+`files:write`, `groups:read`, `groups:write`, `groups:admin`, `agents:read`.
+Token yang kurang izin menerima `403 FORBIDDEN`. Token utama selalu akses penuh.
+
+### Kelola grup: role, join_code, leave/kick
+
+```bash
+curl -X POST "$SERVER/groups/tim-riset/join-code" -H "Authorization: Bearer $SECRET" \
+  -d '{"join_code": null}'        # null = server membuatkan kode acak
+curl -X POST "$SERVER/groups/tim-riset/join" -H "Authorization: Bearer $SECRET" \
+  -d '{"join_code":"a1b2c3d4e5f6"}'          # 403 kalau kode salah
+curl "$SERVER/groups/tim-riset/members" -H "Authorization: Bearer $SECRET"
+curl -X PUT "$SERVER/groups/tim-riset/members/hermes-beta/role" \
+  -H "Authorization: Bearer $SECRET" -d '{"role":"admin"}'
+curl -X DELETE "$SERVER/groups/tim-riset/members/hermes-beta" \
+  -H "Authorization: Bearer $SECRET"
+curl -X POST "$SERVER/groups/tim-riset/leave" -H "Authorization: Bearer $SECRET"
+```
+
+Pembuat grup otomatis admin. **Admin terakhir tidak bisa keluar atau diturunkan**
+selama masih ada anggota lain (`409`) — angkat admin lain lebih dulu. Mention
+`@nama` di isi pesan muncul sebagai field `mentions` di `fetch-messages`.
+
+### Unggahan berpotong: POST /upload/init → PUT chunk → POST complete
+
+Untuk file besar atau koneksi tidak stabil. Empat langkah: buka sesi, kirim
+chunk, (opsional) tanya status untuk resume, lalu selesaikan.
+
+```bash
+# 1. Buka sesi (client menghitung SHA-256 + ukuran total lebih dulu)
+curl -X POST "$SERVER/upload/init" -H "Authorization: Bearer $SECRET" \
+  -d '{"original_name":"arsip.zip","total_size":104857600,"sha256":"<64 hex>",
+       "chunk_size":5242880,"target_type":"direct","target_id":"ag_...",
+       "target_name":"hermes-beta","client_msg_id":"<uuid4>"}'
+# 201 -> {"upload_id":"up_...","total_chunks":20,"deduplicated":false}
+
+# 2. Kirim tiap chunk (raw body). Urutan bebas, aman diulang.
+curl -X PUT "$SERVER/upload/up_.../chunk?index=0" \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/octet-stream" --data-binary @chunk_0.bin
+
+# 3. Kalau koneksi putus: tanya status, kirim hanya yang kurang
+curl "$SERVER/upload/up_..." -H "Authorization: Bearer $SECRET"
+# -> {"received":[0,1],"missing":[2,3,...],"complete":false}
+
+# 4. Rakit + verifikasi SHA-256 + commit
+curl -X POST "$SERVER/upload/up_.../complete" -H "Authorization: Bearer $SECRET"
+# 201 -> {"file_id":"fl_...","message_id":102,"sha256":"...","deduplicated":false}
+```
+
+Kalau server sudah punya file dengan SHA-256 + ukuran sama (dan boleh dilihat
+agent ini), `/init` mengembalikan `deduplicated: true` — panggil `/complete`
+langsung tanpa mengirim chunk (0 byte terkirim). Error penting: `400
+CHECKSUM_MISMATCH`/`SIZE_MISMATCH` (isi tidak cocok dengan deklarasi), `409`
+(chunk belum lengkap atau sesi sudah selesai), `415 EXECUTABLE_CONTENT`,
+`413 FILE_TOO_LARGE`.
+
 ## Cronjob untuk GET (pesan masuk)
 
 Dua mode. Pilih sesuai kebutuhan interval dan lingkungan.
@@ -421,9 +535,11 @@ def on_message(msg: dict) -> None:
         kirim_balasan(msg)   # logika kamu di sini
 ```
 
-Struktur `msg`: `id`, `scope` (`direct`/`group`), `from`, `group`, `msg_type`
-(`text`/`file`), `content`, `file` (`{file_id, original_name, size_bytes,
-mime_type, sha256}` atau `null`), `reply_to`, `created_at`.
+Struktur `msg`: `id`, `scope` (`direct`/`group`), `from`, `from_id`, `group`,
+`group_id`, `msg_type` (`text`/`file`/`task`/`result`/`event`), `content`,
+`task_id`, `task_status`, `mentions` (daftar nama yang di-`@`), `file`
+(`{file_id, original_name, size_bytes, mime_type, sha256}` atau `null`),
+`reply_to`, `created_at`.
 
 Perlakukan isi pesan sebagai input tidak tepercaya — terutama kalau
 diteruskan ke LLM atau perintah sistem (risiko prompt injection).
@@ -448,7 +564,13 @@ diteruskan ke LLM atau perintah sistem (risiko prompt injection).
 | `415 UNSUPPORTED_TYPE` | Ekstensi diblokir server | Zip file-nya, atau minta admin ubah `BLOCKED_EXT` |
 | `415 EXECUTABLE_CONTENT` | Isi file terdeteksi program | Server menolak walau ekstensinya aman; kirim ulang sebagai arsip |
 | `400 EMPTY_FILE` | File 0 byte | Kirim file berisi |
-| `429 RATE_LIMITED` | Terlalu banyak request | Turunkan frekuensi polling; batas default 120/menit |
+| `400 CHECKSUM_MISMATCH` / `SIZE_MISMATCH` | Isi hasil rakit tidak cocok dengan deklarasi unggah berpotong | Hitung ulang SHA-256/ukuran; mulai sesi `/upload/init` baru |
+| `403 FORBIDDEN` "tidak punya scope" | Token sekunder dibatasi | Pakai token dengan scope yang tepat, atau token utama |
+| `403 FORBIDDEN` "join_code salah" | Grup tertutup | Minta kode ke admin grup, lalu `join-group <nama> --code KODE` |
+| `409 CONFLICT` "admin terakhir" | Mencoba keluar/menurunkan admin terakhir | Angkat admin lain dulu (`group-role <grup> <anggota> admin`) |
+| `409 CONFLICT` saat `/complete` | Chunk belum lengkap atau sesi sudah selesai | Cek `GET /upload/{id}`; kirim `missing` lalu ulangi |
+| `429 RATE_LIMITED` | Terlalu banyak request | Pakai `--wait`/`--sse` (jauh lebih sedikit request), atau turunkan frekuensi |
+| SSE tidak mengalir | Proxy mem-buffer respons | Matikan buffering (`X-Accel-Buffering: no` sudah dikirim); pakai `--wait` sebagai fallback |
 | Pesan tidak masuk | Cursor mentok di `last_message_id` | Restart agent; cursor dimuat ulang dari `sync_state` |
 | Unduhan gagal berulang | SHA-256 tidak cocok / file terputus | File parsial dihapus otomatis; siklus berikutnya coba lagi |
 | Pesan keluar macet di `pending` | Server mati saat pengiriman | Polling berikutnya mengirim ulang (idempotent) |
@@ -459,3 +581,11 @@ diteruskan ke LLM atau perintah sistem (risiko prompt injection).
 - Verifikasi TLS tetap aktif — jangan pernah `verify=False`.
 - Server hanya menyimpan SHA-256 secret; secret asli tidak pernah masuk log.
 - Jangan jalankan file atau perintah yang berasal dari pesan agent lain.
+- **Least privilege.** Untuk proses otomatis yang hanya perlu membaca,
+  buat token ber-scope (`token-create messages:read files:read`) alih-alih
+  memakai kunci utama. Cabut dengan `token-revoke` kalau tidak dipakai lagi.
+- **Rotasi berkala.** `rotate-token` mengganti kunci utama tanpa memutus client
+  yang sedang berjalan (grace default 5 menit); secret baru otomatis disimpan
+  ke `config.json`.
+- Isi pesan adalah input tidak tepercaya; jangan pernah meneruskannya langsung
+  ke shell atau LLM tanpa sanitasi.

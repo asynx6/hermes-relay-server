@@ -145,15 +145,19 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
     path = Path(args.path)
     if not path.is_file():
         raise SystemExit(f"File tidak ditemukan: {path}")
-    target_id, target_name = resolve_agent(api, args.target)
+    scope = "group" if getattr(args, "group", False) else "direct"
+    if scope == "group":
+        target_id, target_name = resolve_group(api, args.target)
+    else:
+        target_id, target_name = resolve_agent(api, args.target)
     caption = " ".join(args.caption) if args.caption else ""
     client_msg_id = str(uuid.uuid4())
     data = api.upload_file(
-        str(path), "direct", target_id, target_name, client_msg_id, caption
+        str(path), scope, target_id, target_name, client_msg_id, caption
     )
     # Pesan file tersimpan sebagai pesan bertipe file dengan caption.
     memory.save_outgoing(
-        "direct", target_name, target_id, caption or f"[file {path.name}]",
+        scope, target_name, target_id, caption or f"[file {path.name}]",
         client_msg_id, msg_type="text", file_id=data["file_id"],
     )
     row = memory.conn.execute(
@@ -161,25 +165,153 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
     ).fetchone()
     memory.mark_sent(row["id"], data["message_id"])
     upload_row = memory.record_file(
-        file_id=data["file_id"], direction="upload", scope="direct",
+        file_id=data["file_id"], direction="upload", scope=scope,
         peer=target_name, original_name=path.name, size_bytes=data["size_bytes"],
     )
     memory.update_file_status(
         upload_row, "done", local_path=str(path), sha256=data["sha256"]
     )
-    print(f"File terkirim ke {target_name} ({target_id}) — file_id={data['file_id']}, message_id={data['message_id']}")
+    where = f"grup {target_name}" if scope == "group" else target_name
+    extra = " (dedupe: isi sama sudah ada)" if data.get("deduplicated") else ""
+    print(
+        f"File terkirim ke {where} ({target_id}) — file_id={data['file_id']}, "
+        f"message_id={data['message_id']}{extra}"
+    )
+    return 0
+
+
+def cmd_upload_big(config, api, memory, args) -> int:
+    """Unggah file besar secara berpotong (chunked) dan resumable."""
+    path = Path(args.path)
+    if not path.is_file():
+        raise SystemExit(f"File tidak ditemukan: {path}")
+    if args.target_type == "group":
+        target_id, target_name = resolve_group(api, args.target)
+    else:
+        target_id, target_name = resolve_agent(api, args.target)
+    caption = " ".join(args.caption) if args.caption else ""
+    client_msg_id = str(uuid.uuid4())
+    size = path.stat().st_size
+
+    def progress(done, total):
+        print(f"  chunk {done}/{total} terkirim", flush=True)
+
+    print(f"Mengunggah {path.name} ({size} byte) ke {target_name}...", flush=True)
+    data = api.chunked_upload(
+        str(path), args.target_type, target_id, target_name, client_msg_id,
+        caption, chunk_mb=args.chunk_mb, on_progress=progress,
+    )
+    scope = args.target_type
+    memory.save_outgoing(
+        scope, target_name, target_id, caption or f"[file {path.name}]",
+        client_msg_id, msg_type="text", file_id=data["file_id"],
+    )
+    row = memory.conn.execute(
+        "SELECT id FROM conversations WHERE client_msg_id = ?", (client_msg_id,)
+    ).fetchone()
+    memory.mark_sent(row["id"], data["message_id"])
+    upload_row = memory.record_file(
+        file_id=data["file_id"], direction="upload", scope=scope,
+        peer=target_name, original_name=path.name, size_bytes=data["size_bytes"],
+    )
+    memory.update_file_status(
+        upload_row, "done", local_path=str(path), sha256=data["sha256"]
+    )
+    extra = " (dedupe: 0 byte terkirim)" if data.get("deduplicated") else ""
+    print(
+        f"Selesai: file_id={data['file_id']}, message_id={data['message_id']}{extra}"
+    )
     return 0
 
 
 def cmd_create_group(config, api, memory, args) -> int:
     data = api.create_group(args.name, " ".join(args.description) if args.description else None)
-    print(f"Grup dibuat: {data['name']} (group_id={data['group_id']})")
+    print(f"Grup dibuat: {data['name']} (group_id={data['group_id']}, role={data['role']})")
     return 0
 
 
 def cmd_join_group(config, api, memory, args) -> int:
-    data = api.join_group(args.group)
-    print(f"Bergabung ke '{data['group']}' sejak {data['joined_at']}")
+    data = api.join_group(args.group, getattr(args, "code", None))
+    state = "sudah anggota" if data.get("already_member") else "bergabung"
+    print(f"{data['group']}: {state} (role={data.get('role')}, sejak {data.get('joined_at')})")
+    return 0
+
+
+def cmd_leave_group(config, api, memory, args) -> int:
+    api.leave_group(args.group)
+    print(f"Keluar dari grup '{args.group}'.")
+    return 0
+
+
+def cmd_group_members(config, api, memory, args) -> int:
+    data = api.list_members(args.group)
+    print(f"Anggota grup '{data['group']}' ({len(data['members'])}):")
+    for m in data["members"]:
+        print(f"  {m['name']:<24} {m['role']:<8} sejak {m['joined_at']}")
+    return 0
+
+
+def cmd_group_kick(config, api, memory, args) -> int:
+    api.kick_member(args.group, args.member)
+    print(f"'{args.member}' dikeluarkan dari grup '{args.group}'.")
+    return 0
+
+
+def cmd_group_role(config, api, memory, args) -> int:
+    api.set_role(args.group, args.member, args.role)
+    print(f"Role '{args.member}' di grup '{args.group}' -> {args.role}.")
+    return 0
+
+
+def cmd_group_join_code(config, api, memory, args) -> int:
+    if args.clear:
+        api.clear_join_code(args.group)
+        print(f"join_code grup '{args.group}' dihapus (grup terbuka).")
+    else:
+        data = api.set_join_code(args.group, args.code)
+        print(f"join_code grup '{args.group}': {data['join_code']}")
+    return 0
+
+
+def cmd_tokens(config, api, memory, args) -> int:
+    tokens = api.list_tokens()
+    if getattr(args, "json", False):
+        import json as _json
+
+        print(_json.dumps(tokens, indent=2, ensure_ascii=False))
+        return 0
+    if not tokens:
+        print("Belum ada token sekunder. Buat dengan: token-create <scope...>")
+        return 0
+    print(f"{'TOKEN ID':<14} {'STATUS':<9} {'SCOPE':<40} LABEL")
+    for t in tokens:
+        scopes = ",".join(t["scopes"])
+        print(f"{t['token_id']:<14} {t['status']:<9} {scopes:<40} {t.get('label') or '-'}")
+    return 0
+
+
+def cmd_token_create(config, api, memory, args) -> int:
+    data = api.create_token(args.scopes, args.label, args.days)
+    print(f"Token dibuat: {data['token_id']} scope={','.join(data['scopes'])}")
+    print(f"secret_key: {data['secret_key']}")
+    print("Simpan sekarang — nilai ini tidak ditampilkan lagi.")
+    return 0
+
+
+def cmd_token_revoke(config, api, memory, args) -> int:
+    api.revoke_token(args.token_id)
+    print(f"Token '{args.token_id}' dicabut.")
+    return 0
+
+
+def cmd_rotate_token(config, api, memory, args) -> int:
+    data = api.rotate_token()
+    # Simpan otomatis ke config supaya client langsung memakai kunci baru.
+    config.save_registration(data["secret_key"])
+    print(
+        f"Kunci diputar. secret_key baru disimpan ke config.json. "
+        f"Kunci lama berlaku {data['grace_minutes']} menit lagi."
+    )
     return 0
 
 
@@ -286,24 +418,53 @@ def cmd_download_file(config, api, memory, file_handler, args) -> int:
     return 0
 
 
-def build_poller(config, api, memory, file_handler) -> Poller:
+def _transport(config, args) -> dict:
+    """Opsi transport: SSE > long polling > polling biasa.
+
+    CLI (`--sse`/`--wait`) menimpa nilai config (`use_sse`/`poll_wait_seconds`).
+    """
+    use_sse = bool(getattr(args, "sse", False)) or bool(getattr(config, "use_sse", False))
+    cli_wait = getattr(args, "wait", None)
+    if cli_wait is None:
+        cli_wait = getattr(config, "poll_wait_seconds", 0)
+    wait = 0 if use_sse else max(0, int(cli_wait or 0))
+    return {"wait_seconds": wait, "use_sse": use_sse}
+
+
+def build_poller(config, api, memory, file_handler, *, wait_seconds: int = 0,
+                 use_sse: bool = False) -> Poller:
+    """Bentuk Poller lengkap dengan opsi transport.
+
+    Satu titik konstruksi untuk `poll` dan `fetch-once`, supaya keduanya tidak
+    bisa berbeda soal interval maupun transport.
+    """
     return Poller(
         api, memory, file_handler,
         poll_min=config.poll_min_seconds, poll_max=config.poll_max_seconds,
+        wait_seconds=wait_seconds, use_sse=use_sse,
     )
 
 
 def cmd_poll(config, api, memory, file_handler, args) -> int:
-    poller = build_poller(config, api, memory, file_handler)
+    transport = _transport(config, args)
+    poller = build_poller(
+        config, api, memory, file_handler,
+        wait_seconds=transport["wait_seconds"], use_sse=transport["use_sse"],
+    )
 
     def handle_signal(signum, frame):
         poller.stop_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
 
+    if transport["use_sse"]:
+        mode = "SSE (satu koneksi, server mendorong pesan)"
+    elif transport["wait_seconds"]:
+        mode = f"long polling (request ditahan sampai {transport['wait_seconds']}s)"
+    else:
+        mode = f"polling adaptif (interval {config.poll_min_seconds}-{config.poll_max_seconds}s)"
     print(
-        f"Polling dimulai sebagai '{config.agent_name}' ke {config.server_url} "
-        f"(interval {config.poll_min_seconds}-{config.poll_max_seconds}s). "
+        f"Mulai sebagai '{config.agent_name}' ke {config.server_url} — {mode}. "
         "Ctrl+C untuk berhenti.",
         flush=True,
     )
@@ -314,7 +475,7 @@ def cmd_poll(config, api, memory, file_handler, args) -> int:
             poller.run()
         except KeyboardInterrupt:
             poller.stop_event.set()
-            print("\nPolling dihentikan.", flush=True)
+            print("\nDihentikan.", flush=True)
     return 2 if poller.auth_rejected else 0
 
 
@@ -324,7 +485,11 @@ def cmd_fetch_once(config, api, memory, file_handler, args) -> int:
     Exit code: 0 = server merespons, 1 = server tidak merespons,
     2 = token ditolak (perlu perhatian manusia).
     """
-    poller = build_poller(config, api, memory, file_handler)
+    transport = _transport(config, args)
+    poller = build_poller(
+        config, api, memory, file_handler,
+        wait_seconds=transport["wait_seconds"],
+    )
     with instance_lock(lock_path(args)):
         reachable, _ = poller.poll_once()
     if not reachable:
@@ -396,12 +561,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default=str(CONFIG_PATH), help="path config.json")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("poll", help="jalankan loop polling (default)")
-
-    sub.add_parser(
-        "fetch-once",
-        help="satu siklus polling lalu keluar (untuk cron; exit 0=ok, 1=server mati, 2=token ditolak)",
+    p_poll = sub.add_parser("poll", help="jalankan loop pengambilan pesan (default)")
+    p_poll.add_argument(
+        "--wait", type=int, default=None,
+        help="long polling: tahan request sampai N detik (mis. 25)",
     )
+    p_poll.add_argument("--sse", action="store_true", help="pakai SSE (satu koneksi)")
+
+    p_once = sub.add_parser(
+        "fetch-once",
+        help="satu siklus lalu keluar (untuk cron; exit 0=ok, 1=server mati, 2=token ditolak)",
+    )
+    p_once.add_argument("--wait", type=int, default=None, help="long polling sampai N detik")
 
     sub.add_parser("agents", help="daftar semua Hermes terdaftar (nama + ID)")
     sub.add_parser("groups", help="daftar semua grup + status keanggotaan kita")
@@ -430,17 +601,59 @@ def main(argv: list[str] | None = None) -> int:
     p_rc = sub.add_parser("receipts", help="cek status penerimaan pesan kita")
     p_rc.add_argument("message_ids", help="message_id dipisah koma, mis. 12,13")
 
-    p_sf = sub.add_parser("send-file", help="kirim file direct")
+    p_sf = sub.add_parser("send-file", help="kirim file direct (atau ke grup dengan --group)")
     p_sf.add_argument("target")
     p_sf.add_argument("path")
     p_sf.add_argument("caption", nargs="*")
+    p_sf.add_argument("--group", action="store_true", help="target adalah nama grup")
 
     p_cg = sub.add_parser("create-group", help="buat grup baru")
     p_cg.add_argument("name")
     p_cg.add_argument("description", nargs="*")
 
-    p_jg = sub.add_parser("join-group", help="gabung ke grup")
+    p_jg = sub.add_parser("join-group", help="gabung ke grup (pakai join_code kalau perlu)")
     p_jg.add_argument("group")
+    p_jg.add_argument("--code", default=None, help="join_code grup")
+
+    p_lg = sub.add_parser("leave-group", help="keluar dari grup")
+    p_lg.add_argument("group")
+
+    p_gm = sub.add_parser("group-members", help="daftar anggota grup + role")
+    p_gm.add_argument("group")
+
+    p_gk = sub.add_parser("group-kick", help="keluarkan anggota grup (admin)")
+    p_gk.add_argument("group")
+    p_gk.add_argument("member")
+
+    p_gr = sub.add_parser("group-role", help="ubah role anggota (admin)")
+    p_gr.add_argument("group")
+    p_gr.add_argument("member")
+    p_gr.add_argument("role", choices=["admin", "member"])
+
+    p_gj = sub.add_parser("group-join-code", help="atur/hapus join_code grup (admin)")
+    p_gj.add_argument("group")
+    p_gj.add_argument("--code", default=None, help="kode baru (kosong = dibuat server)")
+    p_gj.add_argument("--clear", action="store_true", help="hapus join_code (grup terbuka)")
+
+    p_tl = sub.add_parser("tokens", help="daftar token sekunder milik agent ini")
+    p_tl.add_argument("--json", action="store_true", help="tampilkan JSON mentah")
+
+    p_tc = sub.add_parser("token-create", help="buat token sekunder ber-scope")
+    p_tc.add_argument("scopes", nargs="+", help="mis. messages:read files:read")
+    p_tc.add_argument("--label", default=None)
+    p_tc.add_argument("--days", type=int, default=None, help="masa berlaku (hari)")
+
+    p_tr = sub.add_parser("token-revoke", help="cabut token sekunder")
+    p_tr.add_argument("token_id")
+
+    sub.add_parser("rotate-token", help="putar kunci utama agent (dengan grace)")
+
+    p_ub = sub.add_parser("upload-big", help="unggah file besar (chunked + resumable)")
+    p_ub.add_argument("target_type", choices=["direct", "group"])
+    p_ub.add_argument("target")
+    p_ub.add_argument("path")
+    p_ub.add_argument("caption", nargs="*")
+    p_ub.add_argument("--chunk-mb", type=int, default=5)
 
     p_h = sub.add_parser("history", help="tampilkan riwayat lokal")
     p_h.add_argument("n", type=int, nargs="?", default=20)
@@ -469,10 +682,30 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_receipts(config, api, memory, args)
     if command == "send-file":
         return cmd_send_file(config, api, memory, file_handler, args)
+    if command == "upload-big":
+        return cmd_upload_big(config, api, memory, args)
     if command == "create-group":
         return cmd_create_group(config, api, memory, args)
     if command == "join-group":
         return cmd_join_group(config, api, memory, args)
+    if command == "leave-group":
+        return cmd_leave_group(config, api, memory, args)
+    if command == "group-members":
+        return cmd_group_members(config, api, memory, args)
+    if command == "group-kick":
+        return cmd_group_kick(config, api, memory, args)
+    if command == "group-role":
+        return cmd_group_role(config, api, memory, args)
+    if command == "group-join-code":
+        return cmd_group_join_code(config, api, memory, args)
+    if command == "tokens":
+        return cmd_tokens(config, api, memory, args)
+    if command == "token-create":
+        return cmd_token_create(config, api, memory, args)
+    if command == "token-revoke":
+        return cmd_token_revoke(config, api, memory, args)
+    if command == "rotate-token":
+        return cmd_rotate_token(config, api, memory, args)
     if command == "agents":
         return cmd_list_agents(config, api, memory, args)
     if command == "groups":

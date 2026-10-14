@@ -1,5 +1,4 @@
 """POST /upload-file, GET /files, dan GET /download-file/<file_id>."""
-import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -9,7 +8,7 @@ from ..config import settings
 from ..database import begin_immediate, connect
 from ..ratelimit import limiter
 from ..schemas import PUBLIC_ID_PATTERN, UUID4_PATTERN
-from ..security import api_error, get_current_agent
+from ..security import api_error, require_scope
 from ..services import file_service, message_service
 
 router = APIRouter()
@@ -55,15 +54,6 @@ def _file_out(r) -> dict:
     }
 
 
-def _new_file_id(conn) -> str:
-    while True:
-        candidate = "fl_" + secrets.token_hex(5)
-        if not conn.execute(
-            "SELECT 1 FROM file_logs WHERE file_id = ?", (candidate,)
-        ).fetchone():
-            return candidate
-
-
 @router.post("/upload-file")
 @limiter.limit(lambda: settings.rate_limit_default)
 async def upload_file(
@@ -74,7 +64,7 @@ async def upload_file(
     target_name: str = Form(..., min_length=3, max_length=32),
     client_msg_id: str = Form(..., pattern=UUID4_PATTERN),
     caption: str | None = Form(default=None, max_length=500),
-    agent=Depends(get_current_agent),
+    agent=Depends(require_scope("files:write")),
 ):
     """Unggah file + buat pesan bertipe file dalam satu alur tervalidasi.
 
@@ -118,7 +108,7 @@ async def upload_file(
     final_path = None
     committed = False
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
 
         # (8) Idempotency: client_msg_id yang sama -> balas data pesan lama.
         existing = conn.execute(
@@ -141,6 +131,7 @@ async def upload_file(
                         "mime_type": existing["mime_type"],
                         "sha256": existing["sha256"],
                         "created_at": existing["uploaded_at"],
+                        "deduplicated": False,
                         "duplicate": True,
                     },
                 },
@@ -172,10 +163,21 @@ async def upload_file(
                     f"Kuota penyimpanan {settings.max_storage_mb_per_agent} MB per agent terlampaui.",
                 )
 
-        # (12) Commit atomik: rename + dua INSERT dalam satu transaksi.
-        dest = file_service.finalize(staging, ext, conn)
+        # (12) Commit atomik: dedupe (hardlink) atau rename, lalu dua INSERT.
+        #      Kalau isi yang sama sudah ada dan boleh dilihat agent ini,
+        #      file baru cukup menunjuk isi yang sama — nol byte disk tambahan.
+        dedupe_source = file_service.dedupe_source(
+            conn, agent["id"], meta["sha256"], meta["size"]
+        )
+        deduplicated = dedupe_source is not None
+        if deduplicated:
+            dest = file_service.link_blob(dedupe_source["stored_name"], ext, conn)
+            file_service.discard(staging)
+            staging = None  # sudah dibuang; jangan dua kali
+        else:
+            dest = file_service.finalize(staging, ext, conn)
         final_path = dest
-        file_id = _new_file_id(conn)
+        file_id = file_service.new_file_id(conn)
         conn.execute(
             """INSERT INTO file_logs
                  (file_id, original_name, stored_name, mime_type, size_bytes, sha256,
@@ -235,6 +237,7 @@ async def upload_file(
                 "declared_mime_type": meta["declared_mime"],
                 "sha256": meta["sha256"],
                 "created_at": uploaded_at,
+                "deduplicated": deduplicated,
                 "duplicate": False,
             },
         },
@@ -247,7 +250,7 @@ def list_files(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    agent=Depends(get_current_agent),
+    agent=Depends(require_scope("files:read")),
 ):
     """Daftar file yang boleh diakses agent ini: yang diunggah sendiri,
     yang diterima langsung, atau file di grup tempat agent ini anggota.
@@ -277,7 +280,9 @@ def list_files(
 
 @router.get("/download-file/{file_id}")
 @limiter.limit(lambda: settings.rate_limit_default)
-def download_file(request: Request, file_id: str, agent=Depends(get_current_agent)):
+def download_file(
+    request: Request, file_id: str, agent=Depends(require_scope("files:read"))
+):
     conn = connect()
     try:
         file_row = conn.execute(

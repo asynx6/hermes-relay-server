@@ -1,11 +1,15 @@
-"""Loop polling adaptif: flush outbox, ambil pesan, unduh file, ack.
+"""Loop pengambilan pesan: polling adaptif, long polling, atau SSE.
 
-Interval:
-- ada pesan baru  -> kembali ke POLL_MIN
-- tidak ada pesan -> naik x1.5 sampai POLL_MAX
-- server mati     -> naik x2 (backoff), coba lagi
+Mode (pilih satu):
+- **polling** (default) — interval adaptif: ada pesan -> POLL_MIN, kosong ->
+  naik x1.5 sampai POLL_MAX, server mati -> backoff x2.
+- **long polling** (`wait_seconds>0`) — server menahan request sampai ada
+  pesan atau timeout, jadi latensi hampir instan tanpa menambah jumlah
+  request.
+- **SSE** (`use_sse=True`) — satu koneksi terbuka; server mendorong pesan.
+  Paling hemat; menyambung ulang otomatis dengan backoff.
 
-Ketahanan:
+Ketahanan (berlaku di semua mode):
 - Handler `on_message` dijalankan per pesan dalam try/except; satu pesan
   yang bikin handler error tidak boleh mematikan loop.
 - Kegagalan sementara saat flush outbox menghentikan siklus flush (bukan
@@ -25,12 +29,15 @@ from .handlers import on_message
 class Poller:
     def __init__(self, api, memory, file_handler,
                  poll_min: float = 3.0, poll_max: float = 30.0,
+                 wait_seconds: int = 0, use_sse: bool = False,
                  on_message_fn=on_message):
         self.api = api
         self.memory = memory
         self.file_handler = file_handler
         self.poll_min = poll_min
         self.poll_max = poll_max
+        self.wait_seconds = wait_seconds
+        self.use_sse = use_sse
         self.on_message = on_message_fn
         self.stop_event = threading.Event()
         self.auth_rejected = False
@@ -150,7 +157,9 @@ class Poller:
             pass
 
         try:
-            data = self.api.fetch_messages(since_id=self.memory.get_last_id(), limit=50)
+            data = self.api.fetch_messages(
+                since_id=self.memory.get_last_id(), limit=50, wait=self.wait_seconds
+            )
         except AuthRejected as exc:
             print(str(exc), flush=True)
             self.auth_rejected = True
@@ -187,15 +196,93 @@ class Poller:
         return True, data["has_more"]
 
     def run(self) -> None:
+        if self.use_sse:
+            self.run_sse()
+            return
         interval = self.poll_min
         while not self.stop_event.is_set() and not self.auth_rejected:
             reachable, has_more = self.poll_once()
-            if reachable:
-                interval = self.poll_min if has_more else min(self.poll_max, interval * 1.5)
-            else:
+            if not reachable:
                 interval = min(self.poll_max, interval * 2)
+                self.stop_event.wait(interval)
+                continue
+            if self.wait_seconds > 0:
+                # Server sudah menahan request sampai ada pesan/timeout; tidak
+                # perlu jeda panjang. Jeda kecil hanya saat masih ada sisa.
+                if not has_more:
+                    self.stop_event.wait(0.2)
+                continue
+            interval = self.poll_min if has_more else min(self.poll_max, interval * 1.5)
             if not has_more:
                 self.stop_event.wait(interval)
+
+    # ---- mode SSE ----
+
+    def _housekeeping(self) -> bool:
+        """Flush outbox + ulangi unduhan tertunda. False = token ditolak."""
+        try:
+            self.flush_outbox()
+        except AuthRejected as exc:
+            print(str(exc), flush=True)
+            self.auth_rejected = True
+            return False
+        except Exception as exc:
+            print(f"flush_outbox error: {exc!r}", flush=True)
+        try:
+            self.file_handler.retry_pending(self.api, self.memory)
+        except Exception:
+            pass
+        return True
+
+    def _consume_sse(self, event: str, payload: dict) -> None:
+        if event == "epoch":
+            epoch = payload.get("server_epoch")
+            if epoch and not self.memory.server_epoch_matches(epoch):
+                print(
+                    "PERINGATAN: server_epoch berubah - database server "
+                    "tampaknya di-reset.",
+                    flush=True,
+                )
+            if epoch:
+                self.memory.server_epoch = epoch
+                self.memory.remember_server_epoch(epoch)
+            return
+        if event != "messages":
+            return
+        messages = payload.get("messages") or []
+        if not messages:
+            return
+        try:
+            new_messages = self.memory.save_incoming(messages, payload["next_since_id"])
+        except Exception as exc:
+            print(f"save_incoming error: {exc!r}", flush=True)
+            return
+        self._ack(self._handle_incoming(new_messages))
+
+    def run_sse(self) -> None:
+        """Mode SSE: koneksi tunggal, sambung ulang otomatis dengan backoff."""
+        backoff = self.poll_min
+        while not self.stop_event.is_set() and not self.auth_rejected:
+            if not self._housekeeping():
+                return
+            try:
+                for event, payload in self.api.stream_events(
+                    since_id=self.memory.get_last_id()
+                ):
+                    if self.stop_event.is_set():
+                        break
+                    backoff = self.poll_min
+                    self._consume_sse(event, payload)
+            except AuthRejected as exc:
+                print(str(exc), flush=True)
+                self.auth_rejected = True
+                return
+            except Exception as exc:
+                print(f"SSE terputus ({exc!r}); menyambung ulang...", flush=True)
+            if self.stop_event.is_set():
+                break
+            self.stop_event.wait(backoff)
+            backoff = min(self.poll_max, backoff * 2)
 
     def new_client_msg_id(self) -> str:
         return str(uuid.uuid4())

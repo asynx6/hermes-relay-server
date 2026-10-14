@@ -16,6 +16,8 @@ DEFAULTS = {
     "poll_max_seconds": 30,
     "download_dir": "downloads",
     "max_upload_mb": 25,
+    "poll_wait_seconds": 0,
+    "use_sse": False,
 }
 
 
@@ -36,6 +38,9 @@ class ClientConfig:
         self.poll_max_seconds: float = float(merged["poll_max_seconds"])
         self.download_dir: str = merged["download_dir"]
         self.max_upload_mb: int = int(merged["max_upload_mb"])
+        # Transport: 0 = polling biasa; >0 = long polling; use_sse = SSE.
+        self.poll_wait_seconds: int = int(merged.get("poll_wait_seconds", 0) or 0)
+        self.use_sse: bool = bool(merged.get("use_sse", False))
         self.registration_nonce: str = merged.get("registration_nonce", "")
 
     @property
@@ -60,6 +65,8 @@ class ClientConfig:
             "poll_max_seconds": self.poll_max_seconds,
             "download_dir": self.download_dir,
             "max_upload_mb": self.max_upload_mb,
+            "poll_wait_seconds": self.poll_wait_seconds,
+            "use_sse": self.use_sse,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -78,6 +85,8 @@ class ClientConfig:
             "poll_max_seconds": self.poll_max_seconds,
             "download_dir": self.download_dir,
             "max_upload_mb": self.max_upload_mb,
+            "poll_wait_seconds": self.poll_wait_seconds,
+            "use_sse": self.use_sse,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

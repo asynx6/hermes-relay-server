@@ -12,8 +12,8 @@ from ..security import (
     api_error,
     check_registration_key,
     generate_secret,
-    get_current_agent,
     hash_secret,
+    require_scope,
 )
 from ..services import message_service
 
@@ -121,7 +121,7 @@ def _agent_id_of(conn, name: str) -> str | None:
 
 @router.get("/agents")
 @limiter.limit(lambda: settings.rate_limit_default)
-def list_agents(request: Request, agent=Depends(get_current_agent)):
+def list_agents(request: Request, agent=Depends(require_scope("agents:read"))):
     """Direktori agent: siapa saja yang terdaftar (untuk discovery sebelum chat)."""
     conn = connect()
     try:

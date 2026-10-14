@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from ..config import settings
-from ..database import connect
+from ..database import begin_immediate, connect
 from ..ratelimit import limiter
 from ..security import api_error
-from ..services import file_service, message_service
+from ..services import audit_service, file_service, message_service
 from . import auth
 from .schemas import (
     ChangePasswordRequest,
@@ -41,10 +41,34 @@ def require_session(request: Request) -> None:
 session_dep = Depends(require_session)
 
 
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def _audit(request: Request, action: str, *, target: str | None = None,
+           detail: dict | None = None, result: str = "ok") -> None:
+    """Catat aksi dashboard. Kegagalan audit tidak menggagalkan aksi utama."""
+    conn = connect()
+    try:
+        audit_service.safe_record(
+            conn,
+            actor="dashboard",
+            actor_type="dashboard",
+            action=action,
+            target=target,
+            detail=detail,
+            ip=_client_ip(request),
+            result=result,
+        )
+    finally:
+        conn.close()
+
+
 @router.post("/login")
 @limiter.limit(lambda: settings.rate_limit_login)
 def login(body: LoginRequest, request: Request):
     if not auth.verify_password(body.password):
+        _audit(request, audit_service.ACTION_LOGIN_FAILED, result="denied")
         raise api_error(401, "UNAUTHORIZED", "Password salah.")
     token, exp = auth.issue_token()
     response = JSONResponse(
@@ -92,9 +116,10 @@ def change_password(body: ChangePasswordRequest, request: Request, _=session_dep
     try:
         auth.change_password(body.old_password, body.new_password)
     except auth.AuthError as exc:
+        _audit(request, audit_service.ACTION_CHANGE_PASSWORD, result="denied")
         raise api_error(400, "BAD_REQUEST", str(exc))
-    # Password berubah: semua sesi lama tetap valid sampai exp. Kalau ingin
-    # memaksa logout semua perangkat, hapus data/dashboard_jwt_secret.
+    # Ganti password menaikkan epoch JWT: semua sesi lama langsung ditolak.
+    _audit(request, audit_service.ACTION_CHANGE_PASSWORD)
     return {"status": "ok", "data": {"message": "Password diperbarui."}}
 
 
@@ -268,7 +293,7 @@ def send_message(body: SendMessageRequest, request: Request, _=session_dep):
     """Kirim pesan sebagai agent pilihan admin (lihat catatan di schemas)."""
     conn = connect()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        begin_immediate(conn)
         sender = _resolve_agent_row(conn, body.as_agent)
 
         if body.target_type == "direct":
@@ -293,6 +318,16 @@ def send_message(body: SendMessageRequest, request: Request, _=session_dep):
             group_id=group_id,
             content=body.content,
             reply_to=None,
+        )
+        # Aksi paling sensitif di dashboard: kirim atas nama agent lain.
+        audit_service.record(
+            conn,
+            actor="dashboard",
+            actor_type="dashboard",
+            action=audit_service.ACTION_SEND_AS_AGENT,
+            target=f"{body.as_agent} -> {body.target_name}",
+            detail={"target_type": body.target_type, "message_id": row["id"]},
+            ip=_client_ip(request),
         )
         conn.commit()
         message_id, created_at = row["id"], row["created_at"]
@@ -620,7 +655,52 @@ def delete_file(stored_name: str, request: Request, _=session_dep):
             "WHERE file_id = ?",
             (row["file_id"],),
         )
+        # Hardlink dedupe: menghapus satu nama tidak menghapus isi selama
+        # masih ada baris lain yang menunjuk inode yang sama.
+        audit_service.record(
+            conn,
+            actor="dashboard",
+            actor_type="dashboard",
+            action=audit_service.ACTION_DELETE_FILE,
+            target=row["file_id"],
+            detail={"stored_name": safe, "original_name": row["original_name"]},
+            ip=_client_ip(request),
+        )
         conn.commit()
     finally:
         conn.close()
     return {"status": "ok", "data": {"deleted": safe}}
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+@router.get("/audit")
+@limiter.limit(lambda: settings.rate_limit_default)
+def list_audit(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    action: str | None = Query(default=None, max_length=64),
+    actor_type: str | None = Query(default=None, max_length=16),
+    _=session_dep,
+):
+    """Jejak aksi administratif & keamanan (terbaru dulu)."""
+    conn = connect()
+    try:
+        rows, total = audit_service.recent(
+            conn, limit=limit, offset=offset, action=action, actor_type=actor_type
+        )
+    finally:
+        conn.close()
+    return {
+        "status": "ok",
+        "data": {
+            "entries": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total,
+        },
+    }

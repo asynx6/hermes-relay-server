@@ -212,14 +212,8 @@ def resolve_mime(detected: str | None, declared: str | None, filename: str) -> s
     return detected or "application/octet-stream"
 
 
-def finalize(staging: Path, ext: str, conn) -> Path:
-    """Pindahkan staging ke nama final `<uuid4>.<ext>` secara atomik.
-
-    Nama final dijamin unik: di-loop sampai tidak ada di disk maupun di
-    tabel file_logs, jadi dua unggahan dengan nama asli yang sama tidak
-    mungkin saling menimpa. `os.replace` atomik pada filesystem yang sama,
-    sehingga pembaca tidak pernah melihat file setengah tertulis.
-    """
+def _unique_final_path(ext: str, conn) -> Path:
+    """Path final `<uuid4>.<ext>` yang dijamin unik di disk dan di file_logs."""
     fm_root = settings.filemanager_dir.resolve()
     for _ in range(10):
         candidate = (fm_root / f"{uuid.uuid4().hex}{ext}").resolve()
@@ -232,15 +226,95 @@ def finalize(staging: Path, ext: str, conn) -> Path:
         ).fetchone()
         if row:
             continue
-        os.replace(staging, candidate)
         return candidate
     raise UploadRejected(500, "INTERNAL_ERROR", "Gagal menentukan nama penyimpanan unik.")
+
+
+def finalize(staging: Path, ext: str, conn) -> Path:
+    """Pindahkan staging ke nama final `<uuid4>.<ext>` secara atomik.
+
+    Nama final dijamin unik: di-loop sampai tidak ada di disk maupun di
+    tabel file_logs, jadi dua unggahan dengan nama asli yang sama tidak
+    mungkin saling menimpa. `os.replace` atomik pada filesystem yang sama,
+    sehingga pembaca tidak pernah melihat file setengah tertulis.
+    """
+    candidate = _unique_final_path(ext, conn)
+    os.replace(staging, candidate)
+    return candidate
+
+
+def dedupe_source(conn, agent_row_id: int, sha256: str, size_bytes: int) -> dict | None:
+    """Cari file berisi sama yang **sudah boleh dilihat** agent ini.
+
+    Dedupe dibatasi pada file yang memang terlihat oleh pemanggil (unggahan
+    sendiri, kiriman langsung, atau grup tempatnya anggota). Kalau tidak
+    dibatasi, agent bisa menebak isi file milik orang lain hanya dengan
+    menanyakan hash-nya.
+
+    Kembalikan dict `{stored_name, file_id, mime_type}` kalau ada, else None.
+    """
+    row = conn.execute(
+        """SELECT fl.stored_name, fl.file_id, fl.mime_type
+           FROM file_logs fl
+           WHERE fl.sha256 = :sha AND fl.size_bytes = :size AND fl.deleted_at IS NULL
+             AND (
+                   fl.uploader_id = :me
+                   OR fl.recipient_id = :me
+                   OR EXISTS (
+                       SELECT 1 FROM group_members gm
+                       WHERE gm.group_id = fl.group_id AND gm.agent_id = :me
+                         AND fl.uploaded_at >= gm.joined_at
+                   )
+                 )
+           ORDER BY fl.id LIMIT 1""",
+        {"sha": sha256, "size": size_bytes, "me": agent_row_id},
+    ).fetchone()
+    if row is None:
+        return None
+    if not (settings.filemanager_dir / row["stored_name"]).is_file():
+        return None
+    return {
+        "stored_name": row["stored_name"],
+        "file_id": row["file_id"],
+        "mime_type": row["mime_type"],
+    }
+
+
+def link_blob(source_name: str, ext: str, conn) -> Path:
+    """Buat nama final baru yang menunjuk isi blob yang sama.
+
+    Memakai hardlink: dua baris `file_logs` dengan isi identik berbagi satu
+    inode, jadi ruang disk tidak terpakai dua kali dan baru benar-benar bebas
+    ketika link terakhir dihapus. Kalau filesystem tidak mendukung hardlink,
+    fallback ke salin file biasa.
+    """
+    source = settings.filemanager_dir / source_name
+    candidate = _unique_final_path(ext, conn)
+    try:
+        os.link(source, candidate)
+    except OSError:
+        import shutil
+
+        shutil.copyfile(source, candidate)
+    return candidate
 
 
 def discard(path: Path | None) -> None:
     """Buang file staging sisa (mis. request duplikat)."""
     if path:
         Path(path).unlink(missing_ok=True)
+
+
+def new_file_id(conn) -> str:
+    """ID publik file yang belum dipakai (`fl_<10 hex>`)."""
+    import secrets as _secrets
+
+    while True:
+        candidate = "fl_" + _secrets.token_hex(5)
+        if not conn.execute(
+            "SELECT 1 FROM file_logs WHERE file_id = ?", (candidate,)
+        ).fetchone():
+            return candidate
 
 
 def check_download_permission(conn, file_row, agent_row_id: int) -> None:

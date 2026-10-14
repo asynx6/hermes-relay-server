@@ -90,3 +90,94 @@ CREATE TABLE IF NOT EXISTS file_logs (
     deleted_at     TEXT,
     CHECK ((recipient_id IS NULL) <> (group_id IS NULL))
 );
+CREATE INDEX IF NOT EXISTS idx_file_logs_sha256 ON file_logs (sha256);
+
+-- ---------------------------------------------------------------------------
+-- Keamanan token: token sekunder ber-scope, grace rotasi, dan audit log
+-- ---------------------------------------------------------------------------
+
+-- Token utama agent (agents.secret_hash) selalu ber-akses penuh (scope "*").
+-- Tabel ini menampung token tambahan yang izinnya dibatasi — mis. token
+-- baca-saja untuk dipasang di tempat yang kurang aman, atau token yang hanya
+-- boleh menyentuh satu jenis operasi.
+CREATE TABLE IF NOT EXISTS agent_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id     TEXT    NOT NULL UNIQUE,
+    agent_id     INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    label        TEXT,
+    secret_hash  TEXT    NOT NULL UNIQUE,
+    scopes       TEXT    NOT NULL,          -- JSON array, mis. ["messages:read"]
+    status       TEXT    NOT NULL DEFAULT 'active'
+                 CHECK (status IN ('active', 'revoked')),
+    created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_used_at TEXT,
+    expires_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tokens_agent ON agent_tokens (agent_id, status);
+
+-- Rotasi token: hash kunci lama tetap diterima sampai jendela grace habis,
+-- supaya client yang sedang berjalan bisa menukar kunci tanpa putus.
+CREATE TABLE IF NOT EXISTS token_rotation_grace (
+    old_hash   TEXT PRIMARY KEY,
+    agent_id   INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Audit log append-only. Dashboard bisa mengirim sebagai agent mana pun dan
+-- mengunduh semua file; tanpa jejak, penyalahgunaan tidak bisa ditelusuri.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor      TEXT    NOT NULL,
+    actor_type TEXT    NOT NULL CHECK (actor_type IN ('dashboard', 'agent', 'system')),
+    action     TEXT    NOT NULL,
+    target     TEXT,
+    detail     TEXT,
+    ip         TEXT,
+    result     TEXT    NOT NULL DEFAULT 'ok'
+               CHECK (result IN ('ok', 'denied', 'error')),
+    at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log (at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Kelola grup lanjutan: role anggota dan mention
+-- ---------------------------------------------------------------------------
+
+-- Mention @agent pada isi pesan; memudahkan penerima menyaring pesan yang
+-- benar-benar menyebut dirinya.
+CREATE TABLE IF NOT EXISTS message_mentions (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    agent_id   INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, agent_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- Unggahan berpotong (chunked) dan resumable
+-- ---------------------------------------------------------------------------
+
+-- Satu sesi unggah. Chunk ditulis ke .staging/<upload_id>/chunk_<n>, lalu
+-- dirakit dan diverifikasi SHA-256 total sebelum commit atomik.
+CREATE TABLE IF NOT EXISTS upload_sessions (
+    upload_id     TEXT    PRIMARY KEY,
+    agent_id      INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    original_name TEXT    NOT NULL,
+    mime_type     TEXT,
+    total_size    INTEGER NOT NULL,
+    chunk_size    INTEGER NOT NULL,
+    total_chunks  INTEGER NOT NULL,
+    sha256        TEXT    NOT NULL,
+    target_type   TEXT    NOT NULL,
+    target_id     TEXT    NOT NULL,
+    target_name   TEXT    NOT NULL,
+    client_msg_id TEXT    NOT NULL,
+    caption       TEXT,
+    received      TEXT    NOT NULL DEFAULT '',   -- index chunk diterima, dipisah koma
+    status        TEXT    NOT NULL DEFAULT 'open'
+                  CHECK (status IN ('open', 'completed', 'aborted')),
+    file_id       TEXT,
+    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_agent
+    ON upload_sessions (agent_id, status);

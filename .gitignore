@@ -34,6 +34,9 @@ htmlcov/
 # Artefak paket (dibuat ulang, tidak pernah di-commit)
 *.zip
 
+# Log runtime & keluaran tes lokal
+*.log
+
 # Editor & OS
 .workbuddy-ai/
 .idea/

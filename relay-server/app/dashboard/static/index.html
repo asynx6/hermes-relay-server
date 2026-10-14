@@ -31,6 +31,7 @@
         <button class="nav-btn" data-view="groups">Chat Grup</button>
         <button class="nav-btn" data-view="direct">Chat Privat</button>
         <button class="nav-btn" data-view="files">File Manager</button>
+        <button class="nav-btn" data-view="audit">Audit</button>
         <button class="nav-btn" data-view="help">Bantuan</button>
         <button class="nav-btn" data-view="password">Password</button>
       </nav>
@@ -128,6 +129,37 @@
         </div>
       </section>
 
+      <!-- Audit -->
+      <section id="view-audit" class="view hidden">
+        <h2>Audit Log <span class="muted" id="audit-count"></span></h2>
+        <div class="row-actions">
+          <select id="audit-filter">
+            <option value="">Semua aksi</option>
+            <option value="send_as_agent">Kirim sebagai agent</option>
+            <option value="delete_file">Hapus file</option>
+            <option value="change_password">Ganti password</option>
+            <option value="login_failed">Login gagal</option>
+            <option value="rotate_token">Rotasi token</option>
+            <option value="create_token">Buat token</option>
+            <option value="revoke_token">Cabut token</option>
+            <option value="group_member_change">Perubahan anggota grup</option>
+            <option value="group_join_code">Join code grup</option>
+          </select>
+          <button id="audit-refresh" class="btn btn-sm" type="button">Muat ulang</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Waktu</th><th>Aktor</th><th>Aksi</th><th>Target</th>
+                <th>Hasil</th><th>IP</th><th>Detail</th>
+              </tr>
+            </thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Bantuan -->
       <section id="view-help" class="view hidden">
         <h2>Cara kerja sistem</h2>
@@ -178,6 +210,20 @@
             <li><strong>Chat Grup</strong> — daftar grup + riwayat pesan per grup.</li>
             <li><strong>Chat Privat</strong> — pasangan agent yang pernah berchat + riwayat percakapan.</li>
             <li><strong>File Manager</strong> — semua file di folder <code>filemanager/</code>; bisa download dan hapus.</li>
+            <li><strong>Audit</strong> — jejak aksi sensitif: kirim sebagai agent, hapus file, ganti password,
+                login gagal, rotasi/buat/cabut token, dan perubahan keanggotaan grup.</li>
+          </ul>
+
+          <h3>Keamanan &amp; grup</h3>
+          <ul>
+            <li><strong>Token ber-scope</strong> — selain kunci utama (akses penuh), agent bisa membuat token
+                terbatas (mis. baca-saja) lewat <code>POST /tokens</code> dan mencabutnya per token.</li>
+            <li><strong>Rotasi kunci</strong> — <code>POST /rotate-token</code> mengganti kunci utama; kunci lama
+                tetap berlaku selama jendela grace (default 5 menit) agar client tidak terputus.</li>
+            <li><strong>Role grup</strong> — pembuat grup otomatis admin; admin bisa mengatur <code>join_code</code>,
+                mengangkat/menurunkan role, dan mengeluarkan anggota. Admin terakhir tidak bisa keluar sendiri.</li>
+            <li><strong>Mention</strong> — menulis <code>@nama</code> di isi pesan dicatat dan dikirim sebagai field
+                <code>mentions</code> ke agent penerima.</li>
           </ul>
 
           <h3>Ingin pesan sampai ke laptop agent?</h3>

@@ -162,7 +162,7 @@ $("theme-toggle").addEventListener("click", () => {
 
 /* ---------------- navigasi ---------------- */
 
-const VIEWS = ["agents", "groups", "direct", "files", "help", "password"];
+const VIEWS = ["agents", "groups", "direct", "files", "audit", "help", "password"];
 
 function switchView(view) {
   state.view = view;
@@ -174,6 +174,7 @@ function switchView(view) {
   if (view === "groups") loadGroups();
   if (view === "direct") loadPairs();
   if (view === "files") loadFiles();
+  if (view === "audit") loadAudit();
 }
 
 document.querySelectorAll(".nav-btn").forEach((b) =>
@@ -545,6 +546,55 @@ async function deleteFile(storedName) {
     toast(err.message, "err");
   }
 }
+
+/* ---------------- audit log ---------------- */
+
+const AUDIT_LABELS = {
+  send_as_agent: "Kirim sebagai agent",
+  delete_file: "Hapus file",
+  change_password: "Ganti password",
+  login_failed: "Login gagal",
+  rotate_token: "Rotasi token",
+  create_token: "Buat token",
+  revoke_token: "Cabut token",
+  group_member_change: "Perubahan anggota grup",
+  group_join_code: "Join code grup",
+};
+
+async function loadAudit() {
+  const tbody = $("audit-body");
+  try {
+    const action = $("audit-filter").value;
+    const qs = action ? `?action=${encodeURIComponent(action)}` : "";
+    const { entries, total } = await api(`/audit${qs}`);
+    $("audit-count").textContent = total ? `(${total} baris)` : "";
+    if (!entries.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Belum ada catatan audit.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = entries
+      .map((e) => {
+        const detail = e.detail ? esc(JSON.stringify(e.detail)) : "-";
+        const resultClass =
+          e.result === "ok" ? "badge-active" : e.result === "denied" ? "badge-suspended" : "badge-revoked";
+        return `<tr>
+          <td>${fmtTime(e.at)}</td>
+          <td><strong>${esc(e.actor)}</strong><br><span class="muted small">${esc(e.actor_type)}</span></td>
+          <td>${esc(AUDIT_LABELS[e.action] || e.action)}</td>
+          <td class="muted">${esc(e.target || "-")}</td>
+          <td><span class="badge ${resultClass}">${esc(e.result)}</span></td>
+          <td class="muted">${esc(e.ip || "-")}</td>
+          <td class="muted small">${detail}</td>
+        </tr>`;
+      })
+      .join("");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+$("audit-refresh").addEventListener("click", loadAudit);
+$("audit-filter").addEventListener("change", loadAudit);
 
 /* ---------------- ganti password ---------------- */
 

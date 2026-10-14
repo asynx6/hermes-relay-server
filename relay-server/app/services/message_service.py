@@ -5,6 +5,7 @@ target_name, dan server hanya menerima pesan kalau baris dengan ID tersebut
 benar-benar bernama sesuai. Ini mencegah pesan salah kirim akibat nama yang
 berubah atau bentrok.
 """
+import re
 import secrets
 import sqlite3
 
@@ -14,6 +15,52 @@ ID_PATTERN_HINT = (
     "target_id harus seperti 'ag_xxx' (agent) atau 'gr_xxx' (grup) — "
     "lihat GET /agents atau GET /groups."
 )
+
+# Mention @nama di dalam isi pesan. Nama agent mengikuti pola yang sama
+# dengan registrasi: huruf kecil, angka, '_' dan '-'.
+MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9_-]{2,31})")
+
+
+def extract_mentions(content: str | None) -> list[str]:
+    """Ambil nama agent yang di-mention (@nama), unik, urut kemunculan."""
+    if not content:
+        return []
+    return list(dict.fromkeys(MENTION_RE.findall(content.lower())))
+
+
+def store_mentions(
+    conn: sqlite3.Connection,
+    message_id: int,
+    group_id: int | None,
+    names: list[str],
+) -> list[str]:
+    """Catat mention ke `message_mentions`.
+
+    Di grup, hanya mention ke anggota grup yang dicatat — mention ke
+    non-anggota diabaikan (mereka memang tidak akan menerima pesannya).
+    Kembalikan nama yang benar-benar tercatat.
+    """
+    if not names:
+        return []
+    placeholders = ",".join("?" * len(names))
+    if group_id is not None:
+        rows = conn.execute(
+            f"""SELECT a.id, a.name FROM agents a
+                JOIN group_members gm ON gm.agent_id = a.id AND gm.group_id = ?
+                WHERE a.name IN ({placeholders}) COLLATE NOCASE""",
+            (group_id, *names),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT id, name FROM agents WHERE name IN ({placeholders}) COLLATE NOCASE",
+            names,
+        ).fetchall()
+    for r in rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO message_mentions (message_id, agent_id) VALUES (?, ?)",
+            (message_id, r["id"]),
+        )
+    return [r["name"] for r in rows]
 
 
 def new_agent_id(conn: sqlite3.Connection) -> str:
@@ -205,7 +252,10 @@ def fetch_messages(
                   m.reply_to, m.task_id, m.task_status,
                   s.name AS sender_name, s.agent_id AS sender_agent_id,
                   g.name AS group_name, g.group_id AS group_public_id,
-                  fl.original_name, fl.size_bytes, fl.mime_type, fl.sha256
+                  fl.original_name, fl.size_bytes, fl.mime_type, fl.sha256,
+                  (SELECT GROUP_CONCAT(a2.name, ',') FROM message_mentions mm
+                     JOIN agents a2 ON a2.id = mm.agent_id
+                    WHERE mm.message_id = m.id) AS mention_names
            FROM messages m
            JOIN agents s ON s.id = m.sender_id
            LEFT JOIN groups g ON g.id = m.group_id
@@ -251,6 +301,7 @@ def fetch_messages(
                 "content": r["content"],
                 "task_id": r["task_id"],
                 "task_status": r["task_status"],
+                "mentions": r["mention_names"].split(",") if r["mention_names"] else [],
                 "file": file_info,
                 "reply_to": r["reply_to"],
                 "created_at": r["created_at"],

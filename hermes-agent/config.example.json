@@ -6,6 +6,8 @@
   "registration_nonce": "",
   "poll_min_seconds": 3,
   "poll_max_seconds": 30,
+  "poll_wait_seconds": 0,
+  "use_sse": false,
   "download_dir": "downloads",
   "max_upload_mb": 25
 }

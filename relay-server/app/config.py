@@ -25,6 +25,21 @@ class Settings(BaseSettings):
     max_storage_mb_per_agent: int = Field(default=0, ge=0)  # 0 = tanpa kuota
     strict_mime_match: bool = False  # True = tolak kalau ekstensi & isi tidak cocok
 
+    # Unggahan berpotong (chunked) & resumable
+    chunk_mb: int = Field(default=5, ge=1, le=64)  # ukuran maksimal satu chunk
+    chunk_session_hours: int = Field(default=24, ge=1)  # TTL sesi unggah nyasar
+    max_chunked_mb: int = Field(default=512, ge=1)  # batas total unggahan berpotong
+
+    # Keamanan token
+    token_grace_minutes: int = Field(default=5, ge=0, le=1440)
+    audit_log_retention_days: int = Field(default=90, ge=1)
+
+    # Latensi: long polling & SSE (opsional; polling biasa tetap jadi fallback)
+    long_poll_enabled: bool = True
+    long_poll_max_seconds: int = Field(default=25, ge=0, le=60)
+    sse_enabled: bool = True
+    sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)
+
     # Dashboard admin
     dashboard_password: str = "123456"
     session_hours: int = Field(default=24, ge=1, le=8760)
@@ -49,6 +64,14 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def max_chunk_bytes(self) -> int:
+        return self.chunk_mb * 1024 * 1024
+
+    @property
+    def max_chunked_bytes(self) -> int:
+        return self.max_chunked_mb * 1024 * 1024
 
     @property
     def blocked_ext_set(self) -> set[str]:

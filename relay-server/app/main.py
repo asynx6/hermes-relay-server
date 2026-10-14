@@ -14,7 +14,7 @@ from .config import settings
 from .dashboard.routes import router as dashboard_router
 from .database import init_db
 from .ratelimit import limiter
-from .routers import files, groups, messages, register
+from .routers import files, groups, messages, register, tokens, uploads
 
 API_PREFIX = "/api/v1"
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard" / "static"
@@ -114,7 +114,9 @@ def create_app() -> FastAPI:
     app.include_router(register.router, prefix=API_PREFIX)
     app.include_router(messages.router, prefix=API_PREFIX)
     app.include_router(files.router, prefix=API_PREFIX)
+    app.include_router(uploads.router, prefix=API_PREFIX)
     app.include_router(groups.router, prefix=API_PREFIX)
+    app.include_router(tokens.router, prefix=API_PREFIX)
     app.include_router(dashboard_router, prefix=f"{API_PREFIX}/dashboard")
 
     # Antarmuka web dashboard (statis; login dijaga oleh API di atas).

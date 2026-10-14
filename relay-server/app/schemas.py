@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from .security import KNOWN_SCOPES
+
 AGENT_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{2,31}$"
 GROUP_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{2,31}$"
 UUID4_PATTERN = (
@@ -59,6 +61,66 @@ class AckRequest(BaseModel):
 class CreateGroupRequest(BaseModel):
     name: str = Field(..., pattern=GROUP_NAME_PATTERN, max_length=32)
     description: str | None = Field(default=None, max_length=500)
+
+
+# --- keamanan token ---------------------------------------------------------
+
+
+class CreateTokenRequest(BaseModel):
+    """Token sekunder dengan scope terbatas."""
+
+    scopes: list[str] = Field(..., min_length=1, max_length=16)
+    label: str | None = Field(default=None, max_length=64)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def _check_scopes(self):
+        unknown = [s for s in self.scopes if s not in KNOWN_SCOPES]
+        if unknown:
+            raise ValueError(f"scope tidak dikenal: {', '.join(unknown)}")
+        # Dedupe sambil mempertahankan urutan.
+        self.scopes = list(dict.fromkeys(self.scopes))
+        return self
+
+
+# --- kelola grup lanjutan ---------------------------------------------------
+
+
+class JoinGroupRequest(BaseModel):
+    """Join pakai join_code (opsional; kalau kosong, grup harus terbuka)."""
+
+    join_code: str | None = Field(default=None, min_length=4, max_length=64)
+
+
+class SetRoleRequest(BaseModel):
+    role: Literal["admin", "member"]
+
+
+class SetJoinCodeRequest(BaseModel):
+    """Atur/ganti join_code grup.
+
+    `join_code=None` -> server membuatkan kode acak. Untuk mengosongkan
+    (grup kembali terbuka), pakai `DELETE /groups/{name}/join-code`.
+    """
+
+    join_code: str | None = Field(default=None, min_length=4, max_length=64)
+
+
+# --- unggahan berpotong (chunked) ------------------------------------------
+
+
+class ChunkedUploadInitRequest(BaseModel):
+    """Buka sesi unggah berpotong. Client sudah menghitung SHA-256 total."""
+
+    original_name: str = Field(..., min_length=1, max_length=255)
+    total_size: int = Field(..., ge=1)
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    chunk_size: int = Field(..., ge=1)
+    target_type: Literal["direct", "group"]
+    target_id: str = Field(..., pattern=PUBLIC_ID_PATTERN)
+    target_name: str = Field(..., min_length=3, max_length=32)
+    client_msg_id: str = Field(..., pattern=UUID4_PATTERN)
+    caption: str | None = Field(default=None, max_length=500)
 
 
 class MessageOut(BaseModel):

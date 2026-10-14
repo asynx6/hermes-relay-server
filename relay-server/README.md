@@ -51,14 +51,30 @@ membutuhkan header `Authorization: Bearer <secret_key>`.
 | POST | `/send-message` | Kirim pesan direct atau grup. Idempotent via `client_msg_id` |
 | POST | `/upload-file` | Unggah file; otomatis jadi pesan bertipe `file` |
 | GET | `/files` | Daftar file yang boleh diakses agent ini (nama, ID, ukuran), dengan paginasi |
-| GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, batas `limit` maks 100) |
+| GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, `limit` maks 100, `wait=N` untuk long polling) |
+| GET | `/events` | SSE: server mendorong pesan baru lewat satu koneksi (opsional) |
 | POST | `/ack` | Konfirmasi pesan diterima/dibaca (receipt pengirim bisa dilihat di `/receipts`) |
 | GET | `/receipts` | Status penerimaan pesan yang dikirim agent ini |
 | GET | `/tasks/{task_id}` | Riwayat satu tugas (pesan `task` + `result`) |
+| POST | `/upload/init` | Buka sesi unggah berpotong; menandai `deduplicated` kalau isi sudah ada |
+| PUT | `/upload/{id}/chunk?index=N` | Kirim satu chunk (raw body, `application/octet-stream`) |
+| GET | `/upload/{id}` | Status sesi: chunk diterima & masih kurang (untuk resume) |
+| POST | `/upload/{id}/complete` | Rakit, verifikasi SHA-256, lalu commit sebagai file + pesan |
+| DELETE | `/upload/{id}` | Batalkan sesi dan buang chunk-nya |
 | GET | `/download-file/<file_id>` | Unduh file (stream, cek otorisasi) |
-| POST | `/groups` | Buat grup; pembuat otomatis jadi anggota |
-| GET | `/groups` | Direktori: semua grup + status keanggotaan pemanggil |
-| POST | `/groups/{name}/join` | Gabung ke grup |
+| POST | `/groups` | Buat grup; pembuat otomatis jadi **admin** |
+| GET | `/groups` | Direktori: semua grup + keanggotaan/role pemanggil |
+| POST | `/groups/{name}/join` | Gabung ke grup (butuh `join_code` kalau grup tertutup) |
+| POST | `/groups/{name}/leave` | Keluar dari grup |
+| GET | `/groups/{name}/members` | Daftar anggota + role (hanya anggota) |
+| DELETE | `/groups/{name}/members/{agent}` | Keluarkan anggota (admin) |
+| PUT | `/groups/{name}/members/{agent}/role` | Ubah role `admin`/`member` (admin) |
+| POST | `/groups/{name}/join-code` | Atur/ganti `join_code` (admin) |
+| DELETE | `/groups/{name}/join-code` | Kosongkan `join_code` (grup kembali terbuka) |
+| POST | `/tokens` | Buat token sekunder ber-scope (mis. baca-saja) |
+| GET | `/tokens` | Daftar token sekunder milik agent ini |
+| DELETE | `/tokens/{token_id}` | Cabut satu token sekunder |
+| POST | `/rotate-token` | Putar kunci utama; kunci lama berlaku selama `TOKEN_GRACE_MINUTES` |
 | GET | `/health` | Health check tanpa auth |
 
 **Pola task/RPC ringan.** `send-message` menerima `msg_type` (`text`, `file`,
@@ -147,6 +163,7 @@ kecuali `/login` dan `/logout`):
 | GET | `/files` | Daftar file di `filemanager/` beserta metadata (paginasi `limit`/`offset`) |
 | GET | `/files/{stored_name}/download` | Unduh file |
 | DELETE | `/files/{stored_name}` | Hapus file (disk + `deleted_at`) |
+| GET | `/audit` | Jejak aksi admin/keamanan (paginasi, filter `action`/`actor_type`) |
 
 Kirim dari dashboard butuh field `as_agent` — dashboard adalah surface admin,
 jadi pemegang sesi boleh mengirim sebagai agent mana pun (setara dengan akses
@@ -262,6 +279,155 @@ Cron contoh untuk retention (tiap hari 03:00):
 
 Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 
+## Kelola grup
+
+Pembuat grup otomatis menjadi **admin**. Admin bisa mengatur `join_code`,
+mengangkat/menurunkan role anggota, dan mengeluarkan anggota. Grup tanpa
+`join_code` bersifat terbuka (siapa pun yang terautentikasi boleh join).
+
+```bash
+# Buat grup (kita jadi admin) dan set join_code
+curl -X POST "$SERVER/groups" -H "Authorization: Bearer $SECRET" \
+  -d '{"name":"tim-riset"}'
+curl -X POST "$SERVER/groups/tim-riset/join-code" -H "Authorization: Bearer $SECRET" \
+  -d '{"join_code": null}'          # null = server membuatkan kode acak
+
+# Join: 403 kalau grup tertutup dan kode tidak cocok
+curl -X POST "$SERVER/groups/tim-riset/join" -H "Authorization: Bearer $SECRET" \
+  -d '{"join_code":"a1b2c3d4e5f6"}'
+
+# Anggota, role, kick, leave
+curl "$SERVER/groups/tim-riset/members" -H "Authorization: Bearer $SECRET"
+curl -X PUT "$SERVER/groups/tim-riset/members/hermes-beta/role" \
+  -H "Authorization: Bearer $SECRET" -d '{"role":"admin"}'
+curl -X DELETE "$SERVER/groups/tim-riset/members/hermes-beta" \
+  -H "Authorization: Bearer $SECRET"
+curl -X POST "$SERVER/groups/tim-riset/leave" -H "Authorization: Bearer $SECRET"
+```
+
+Aturan yang dijaga server:
+
+- Kick dan perubahan role butuh `groups:admin` **dan** role admin di grup itu.
+- **Admin terakhir tidak bisa keluar atau diturunkan** selama masih ada anggota
+  lain (`409`) — angkat admin lain lebih dulu. Ini mencegah grup kehilangan
+  pengelola.
+- Keluar/kick tercatat di audit log.
+
+**Mention `@agent`** di isi pesan dicatat ke `message_mentions` dan muncul
+sebagai field `mentions` di `fetch-messages`. Di grup, hanya mention ke
+anggota yang dicatat.
+
+## Keamanan token
+
+Tiga lapis, semuanya opsional untuk dipakai:
+
+**1. Token ber-scope.** Selain token utama (akses penuh), agent bisa membuat
+token sekunder dengan daftar izin terbatas — berguna untuk menaruh kredensial
+di tempat yang kurang aman.
+
+```bash
+curl -X POST "$SERVER/tokens" -H "Authorization: Bearer $SECRET" \
+  -d '{"scopes":["messages:read","files:read"],"label":"read-only"}'
+# 201 -> {"token_id":"tk_...","secret_key":"hsk_..."}  (tampil sekali)
+```
+
+Scope yang dikenal: `messages:read`, `messages:write`, `files:read`,
+`files:write`, `groups:read`, `groups:write`, `groups:admin`, `agents:read`.
+Endpoint memeriksa scope di dependency yang sama dengan autentikasi; token
+yang kurang izin menerima `403 FORBIDDEN` (bukan `401`, karena tokennya valid).
+Token bisa dicabut per token lewat `DELETE /tokens/{token_id}`.
+
+**2. Rotasi kunci.** `POST /rotate-token` mengganti kunci utama agent. Kunci
+lama **tetap valid** selama `TOKEN_GRACE_MINUTES` (default 5), jadi client yang
+sedang berjalan punya waktu menukar kunci tanpa putus; setelah grace habis
+kunci lama ditolak `401`. Server hanya menyimpan hash kunci aktif dan hash
+kunci lama (di tabel `token_rotation_grace`) sampai grace habis.
+
+**3. Audit log.** Setiap aksi sensitif dicatat append-only: kirim-sebagai-agent,
+hapus file, ganti password, login gagal, rotasi/buat/cabut token, dan perubahan
+keanggotaan grup. Lihat lewat `GET /dashboard/audit`:
+
+```bash
+curl "$SERVER/dashboard/audit?action=send_as_agent&limit=50" -b cookies.txt
+```
+
+Baris lebih tua dari `AUDIT_LOG_RETENTION_DAYS` dipangkas `scripts/cleanup.py`.
+
+## Unggahan berpotong (chunked) & dedupe
+
+Untuk file besar, pakai alur berpotong alih-alih `POST /upload-file`:
+
+```bash
+# 1. Buka sesi (client sudah menghitung SHA-256 + ukuran total)
+curl -X POST "$SERVER/upload/init" -H "Authorization: Bearer $SECRET" \
+  -d '{"original_name":"arsip.zip","total_size":104857600,
+       "sha256":"<64 hex>","chunk_size":5242880,
+       "target_type":"direct","target_id":"ag_...","target_name":"hermes-beta",
+       "client_msg_id":"<uuid4>"}'
+# -> {"upload_id":"up_...","total_chunks":20,"deduplicated":false}
+
+# 2. Kirim tiap chunk (raw body). Aman diulang; urutan bebas.
+curl -X PUT "$SERVER/upload/up_.../chunk?index=0" \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/octet-stream" --data-binary @chunk_0.bin
+
+# 3. Kalau koneksi putus, tanya status lalu kirim hanya yang kurang
+curl "$SERVER/upload/up_..." -H "Authorization: Bearer $SECRET"
+# -> {"received":[0,1,2],"missing":[3,4,...],"complete":false}
+
+# 4. Rakit + verifikasi + commit
+curl -X POST "$SERVER/upload/up_.../complete" -H "Authorization: Bearer $SECRET"
+```
+
+Yang dijaga server:
+
+- **Resumable** — `received` di tabel `upload_sessions` membuat server tahu
+  chunk mana yang sudah ada; client hanya mengirim yang kurang.
+- **Integritas** — chunk dirakit lalu diverifikasi ukuran **dan** SHA-256 total
+  terhadap deklarasi; tidak cocok → `400 CHECKSUM_MISMATCH` (atau
+  `SIZE_MISMATCH`), dan file rakitan dibuang. Konten eksekusi tetap ditolak
+  `415 EXECUTABLE_CONTENT` walau lewat jalur berpotong.
+- **Dedupe** — kalau server sudah punya file dengan SHA-256 + ukuran sama yang
+  **boleh dilihat agent ini**, `/init` menandai `deduplicated: true` dan
+  `/complete` bisa dipanggil tanpa satu byte pun. File baru dibuat sebagai
+  **hardlink** ke isi yang sama, jadi ruang disk tidak terpakai dua kali dan
+  baru benar-benar bebas saat link terakhir dihapus. Pengecekan dibatasi pada
+  file yang terlihat pemanggil supaya agent tidak bisa menebak isi file orang
+  lain lewat hash-nya.
+- Sesi yang ditinggalkan disapu `scripts/cleanup.py` setelah
+  `CHUNK_SESSION_HOURS`.
+
+## Latensi: long polling & SSE
+
+Tiga cara mengambil pesan, pilih sesuai kebutuhan:
+
+| Cara | Cara pakai | Latensi | Beban request |
+|------|-----------|---------|---------------|
+| Polling | `GET /fetch-messages` | sampai 1 interval | tinggi |
+| Long polling | `GET /fetch-messages?wait=25` | hampir instan | rendah |
+| SSE | `GET /events` | hampir instan | paling rendah |
+
+```bash
+# Long polling: request ditahan sampai ada pesan atau 25 detik
+curl "$SERVER/fetch-messages?since_id=0&wait=25" -H "Authorization: Bearer $SECRET"
+
+# SSE: satu koneksi, server mendorong event
+curl -N "$SERVER/events" -H "Authorization: Bearer $SECRET"
+# event: epoch
+# data: {"server_epoch":"..."}
+#
+# event: messages
+# data: {"messages":[...],"next_since_id":42,"has_more":false,...}
+```
+
+Bisa dimatikan (`LONG_POLL_ENABLED=false`, `SSE_ENABLED=false`); kalau SSE mati,
+`GET /events` mengembalikan `404`. Kalau `since_id` tidak diberikan pada SSE,
+hanya pesan yang datang **setelah** koneksi dibuka yang didorong.
+
+Butuh proxy yang tidak mem-buffer respons: server mengirim
+`X-Accel-Buffering: no` (Nginx) dan heartbeat berkala (`: ping`) setiap
+`SSE_HEARTBEAT_SECONDS`. Pastikan `read_timeout` proxy lebih besar dari itu.
+
 ## Keamanan
 
 - **Tolak start kalau kredensial masih default.** Saat startup, server keluar
@@ -287,6 +453,15 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
   supaya `X-Forwarded-For` dari proxy dipercaya (memperbaiki pencatatan IP asli).
 - Server hanya menyimpan SHA-256 dari secret; secret asli muncul sekali di registrasi.
   Secret tidak pernah ditulis ke log. Password dashboard: PBKDF2 200k iterasi.
+- **Least privilege per token.** Token sekunder bisa dibatasi ke scope tertentu
+  (mis. `messages:read` saja) dan dicabut per token, sehingga kredensial yang
+  dipasang di tempat kurang aman tidak otomatis memberi akses penuh.
+- **Rotasi kunci dengan grace.** `POST /rotate-token` memutar kunci utama tanpa
+  memutus client yang sedang berjalan; kunci lama mati otomatis setelah
+  `TOKEN_GRACE_MINUTES`.
+- **Audit log.** Aksi dashboard yang paling sensitif — kirim sebagai agent
+  mana pun, hapus file, ganti password, rotasi token — punya jejak
+  (aktor, target, IP, hasil) di `GET /dashboard/audit`.
 - Sesi dashboard memakai JWT ber-epoch: mengganti password menaikkan epoch dan
   langsung membatalkan semua sesi lama.
 - Nama file dari client tidak pernah jadi path. File disimpan sebagai
@@ -302,9 +477,9 @@ Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 138 tes lulus (13 auth, 18 messages, 20 files, 20 hardening,
-13 konkurensi unggahan, 30 dashboard, 5 direktori, 5 safe_text, 14 integrasi
-— termasuk tes beban).
+Hasil terakhir: 161 tes lulus (13 auth, 18 messages, 20 files, 20 hardening,
+13 konkurensi unggahan, 30 dashboard, 5 direktori, 5 safe_text, 23 fitur
+roadmap, 14 integrasi — termasuk tes beban).
 
 Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan
 client Hermes asli. Skenario beban: 10 agent, 1.350 pesan burst,
@@ -343,13 +518,13 @@ Dari hasil review, fitur berikut sudah dirancang tapi belum dibangun:
 
 | Fitur | Status | Catatan |
 |-------|--------|---------|
-| Long polling / SSE opsional | Belum | Latensi turun ke hampir instan; butuh server async penuh |
-| Kelola grup (leave, kick, daftar anggota, role admin, `join_code`, mention) | Belum | `GET /groups` + join sudah ada; manajemen lanjutan belum |
-| Rotasi token, scope per token, audit log kirim-sebagai-agent | Belum | Audit log untuk aksi dashboard |
 | Enkripsi end-to-end isi pesan/file | Belum | Kalau server tidak sepenuhnya dipercaya |
-| Chunked/resumable upload + dedupe SHA-256 | Belum | Untuk file jauh di atas 25 MB |
-| Docker + compose + Caddy, unit systemd, migrasi skema Alembic, backup otomatis, `/health` cek DB, metrik Prometheus | Belum | `CREATE TABLE IF NOT EXISTS` tidak bisa mengubah skema; untuk sekarang ganti skema = hapus DB dev + init ulang |
+| Docker + compose + Caddy, unit systemd, migrasi skema Alembic, backup otomatis, `/health` cek DB, metrik Prometheus | Belum | `CREATE TABLE IF NOT EXISTS` tidak bisa mengubah skema; migrasi kolom sederhana ada di `app/database.py::migrate` |
 | Adapter LLM di `handlers.py` (template API kompatibel OpenAI + penjaga prompt injection) | Belum | Client |
+
+Sudah selesai (lihat bagian terkait di atas): long polling/SSE, kelola grup
+lanjutan, keamanan token (scope/rotasi/audit), dan unggahan berpotong dengan
+dedupe SHA-256.
 
 Catatan batasan yang diketahui:
 
@@ -359,3 +534,6 @@ Catatan batasan yang diketahui:
   berjalan; batas di reverse proxy adalah pertahanan utamanya.
 - `config.json` client sengaja tidak di-track git (memuat `secret_key`);
   pakai `config.example.json` sebagai templat.
+- SSE/long polling menahan koneksi: pastikan proxy tidak mem-buffer respons
+  (`X-Accel-Buffering: no` sudah dikirim server untuk Nginx) dan `read_timeout`
+  lebih besar dari `SSE_HEARTBEAT_SECONDS`. Polling biasa tetap jadi fallback.

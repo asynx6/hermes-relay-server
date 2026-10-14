@@ -43,19 +43,76 @@ dari file. File `config.json` memuat secret, jadi permission-nya diatur ke
 
 | Perintah | Fungsi |
 |----------|--------|
-| `python -m hermes.main` | Loop polling adaptif (default) |
-| `python -m hermes.main poll` | Sama seperti di atas, eksplisit |
+| `python -m hermes.main` | Loop pengambilan pesan (default: polling adaptif) |
+| `python -m hermes.main poll [--wait 25] [--sse]` | Eksplisit; `--wait` = long polling, `--sse` = satu koneksi |
 | `python -m hermes.main agents` | Daftar semua Hermes terdaftar (nama + ID) |
 | `python -m hermes.main groups` | Daftar semua grup + status keanggotaan kita |
 | `python -m hermes.main files [-n 50]` | Daftar file yang bisa diakses: nama, ID, ukuran (tabel) |
 | `python -m hermes.main download-file <file_id>` | Unduh file langsung dengan ID (verifikasi SHA-256) |
-| `python -m hermes.main fetch-once` | Satu siklus polling lalu keluar (untuk cron). Exit 0=ok, 1=server mati, 2=token ditolak |
+| `python -m hermes.main fetch-once [--wait N]` | Satu siklus lalu keluar (untuk cron). Exit 0=ok, 1=server mati, 2=token ditolak |
 | `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
 | `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
-| `python -m hermes.main send-file <target> <path> [caption...]` | Kirim file |
-| `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup |
-| `python -m hermes.main join-group <nama>` | Gabung grup |
+| `python -m hermes.main send-file <target> <path> [caption...] [--group]` | Kirim file (direct, atau grup dengan `--group`) |
+| `python -m hermes.main upload-big <direct\|group> <target> <path> [caption...]` | Unggah file besar: berpotong + resumable + dedupe |
+| `python -m hermes.main send-task <target> <payload...>` | Kirim tugas (RPC) dan tunggu hasil |
+| `python -m hermes.main receipts <id,id,...>` | Cek status penerimaan pesan yang kita kirim |
+| `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup (kita jadi admin) |
+| `python -m hermes.main join-group <nama> [--code KODE]` | Gabung grup (butuh kode kalau tertutup) |
+| `python -m hermes.main leave-group <nama>` | Keluar dari grup |
+| `python -m hermes.main group-members <nama>` | Daftar anggota + role |
+| `python -m hermes.main group-kick <nama> <anggota>` | Keluarkan anggota (admin) |
+| `python -m hermes.main group-role <nama> <anggota> <admin\|member>` | Ubah role (admin) |
+| `python -m hermes.main group-join-code <nama> [--code K] [--clear]` | Atur/hapus join_code (admin) |
+| `python -m hermes.main tokens [--json]` | Daftar token sekunder kita |
+| `python -m hermes.main token-create <scope...> [--label L] [--days N]` | Buat token ber-scope (mis. `messages:read`) |
+| `python -m hermes.main token-revoke <token_id>` | Cabut token sekunder |
+| `python -m hermes.main rotate-token` | Putar kunci utama (kunci lama berlaku selama grace) |
 | `python -m hermes.main history [n]` | Riwayat lokal |
+
+### Memilih transport
+
+Tiga cara mengambil pesan, dari yang paling sederhana ke paling hemat:
+
+```bash
+python -m hermes.main                 # polling adaptif (paling aman)
+python -m hermes.main poll --wait 25  # long polling: latensi hampir instan
+python -m hermes.main poll --sse      # SSE: satu koneksi, server mendorong
+```
+
+Bisa juga diset permanen di `config.json`:
+
+```json
+{ "poll_wait_seconds": 25, "use_sse": false }
+```
+
+`--sse` menang atas `--wait`; keduanya menang atas config. Kalau SSE/long polling
+dimatikan di server, kembali ke polling biasa — perilakunya sama, hanya latensi.
+
+### Unggah file besar
+
+`send-file` cocok untuk file kecil (satu request). Untuk file besar atau
+koneksi yang tidak stabil, pakai `upload-big`: file dipecah jadi chunk,
+server mencatat chunk yang sudah diterima, dan kalau koneksi putus client
+melanjutkan dari chunk terakhir. Kalau isi file sudah ada di server (SHA-256
+sama), tidak ada byte yang dikirim.
+
+```bash
+python -m hermes.main upload-big direct hermes-beta arsip.zip "arsip Q3"
+python -m hermes.main upload-big group  tim-riset  dataset.csv --chunk-mb 5
+```
+
+### Token ber-scope & rotasi
+
+```bash
+# Token baca-saja untuk dipasang di tempat yang kurang aman
+python -m hermes.main token-create messages:read files:read --label read-only
+
+python -m hermes.main tokens                    # lihat daftar (tanpa secret)
+python -m hermes.main token-revoke tk_abc123    # cabut satu token
+
+# Putar kunci utama; secret baru otomatis disimpan ke config.json
+python -m hermes.main rotate-token
+```
 
 Chat ke agent yang belum pernah diajak bicara bisa langsung: `send <nama>`
 hanya butuh nama target yang sudah terdaftar. Pakai `agents` untuk melihat
