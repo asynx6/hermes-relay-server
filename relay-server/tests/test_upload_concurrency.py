@@ -1,8 +1,8 @@
-"""Test konkurensi & validasi unggahan: staging + commit atomik.
+"""Upload concurrency & validation tests: staging + atomic commit.
 
-Semua tes di sini memakai server uvicorn sungguhan (fixture live_server)
-dan banyak thread sekaligus, karena kondisi race hanya muncul di luar
-TestClient single-thread.
+All tests here use a real uvicorn server (the live_server fixture)
+and many simultaneous threads, because race conditions only appear outside
+the single-threaded TestClient.
 """
 import hashlib
 import os
@@ -21,8 +21,8 @@ REG_KEY = "test-registration-key"
 
 @pytest.fixture(autouse=True)
 def _relax_limits(monkeypatch):
-    """Limiter singleton dipakai bersama antar tes; longgarkan agar
-    puluhan registrasi tidak kena 429 (batas register 5/menit)."""
+    """The limiter singleton is shared across tests; relax it so that
+    dozens of registrations do not hit 429 (register limit 5/minute)."""
     monkeypatch.setattr("app.config.settings.rate_limit_register", "10000/minute")
     monkeypatch.setattr("app.config.settings.rate_limit_default", "100000/minute")
 
@@ -79,14 +79,14 @@ def staging_files() -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Nama file sama: tidak ada duplikasi maupun kerusakan
+# Same file name: no duplication and no corruption
 # ---------------------------------------------------------------------------
 
 def test_concurrent_same_filename_uploads(live_server, agents_dir, tmp_path):
-    """10 unggahan bersamaan dengan nama file identik.
+    """10 simultaneous uploads with identical file names.
 
-    Harapan: 10 file_id berbeda, 10 file fisik berbeda di disk, semua isi
-    utuh (SHA-256 cocok), 10 pesan tersimpan, staging bersih.
+    Expectation: 10 distinct file_ids, 10 distinct physical files on disk, all
+    contents intact (SHA-256 matches), 10 messages stored, staging clean.
     """
     base = live_server.base_url
     a = register(base, "race-a")
@@ -121,7 +121,7 @@ def test_concurrent_same_filename_uploads(live_server, agents_dir, tmp_path):
     assert count_rows(settings.db_path, "SELECT COUNT(*) FROM file_logs") == 10
     assert count_rows(settings.db_path, "SELECT COUNT(*) FROM messages") == 10
 
-    # Semua salinan bisa diunduh dan isinya utuh.
+    # All copies can be downloaded and their contents are intact.
     with requests.Session() as s:
         s.headers["Authorization"] = f"Bearer {b['secret_key']}"
         for fid in file_ids:
@@ -131,10 +131,10 @@ def test_concurrent_same_filename_uploads(live_server, agents_dir, tmp_path):
 
 
 def test_concurrent_same_client_msg_id(live_server, agents_dir, tmp_path):
-    """8 unggahan bersamaan dengan client_msg_id identik (retry ganda).
+    """8 simultaneous uploads with an identical client_msg_id (double retry).
 
-    Harapan: tepat 1 baris file_logs + 1 pesan; satu respons 201,
-    sisanya 200 duplicate; hanya 1 file fisik.
+    Expectation: exactly 1 file_logs row + 1 message; one 201 response,
+    the rest 200 duplicate; only 1 physical file.
     """
     base = live_server.base_url
     a = register(base, "idem-a")
@@ -173,7 +173,7 @@ def test_concurrent_same_client_msg_id(live_server, agents_dir, tmp_path):
 
 
 def test_same_name_sequential_different_content(live_server, agents_dir, tmp_path):
-    """Nama sama (deklarasi client), isi berbeda: dua versi tersimpan."""
+    """Same name (client declaration), different content: two versions stored."""
     base = live_server.base_url
     a = register(base, "ver-a")
     b = register(base, "ver-b")
@@ -207,7 +207,7 @@ def test_same_name_sequential_different_content(live_server, agents_dir, tmp_pat
 
 
 def test_same_client_msg_id_is_idempotent_sequential(live_server, agents_dir, tmp_path):
-    """Retry dengan client_msg_id sama: tidak membuat duplikat."""
+    """Retry with the same client_msg_id: does not create a duplicate."""
     base = live_server.base_url
     a = register(base, "seq-a")
     b = register(base, "seq-b")
@@ -230,11 +230,11 @@ def test_same_client_msg_id_is_idempotent_sequential(live_server, agents_dir, tm
 
 
 # ---------------------------------------------------------------------------
-# Validasi konten: ekstensi, magic bytes, ukuran, kuota
+# Content validation: extension, magic bytes, size, quota
 # ---------------------------------------------------------------------------
 
 def test_executable_content_rejected_despite_safe_extension(live_server, agents_dir, tmp_path):
-    """File .png yang isinya PE executable (MZ) harus ditolak 415."""
+    """A .png file whose content is a PE executable (MZ) must be rejected with 415."""
     base = live_server.base_url
     a = register(base, "exe-a")
     b = register(base, "exe-b")
@@ -296,7 +296,7 @@ def test_oversize_leaves_no_staging(live_server, agents_dir, tmp_path, monkeypat
     base = live_server.base_url
     a = register(base, "big-a")
     b = register(base, "big-b")
-    # max_upload_bytes adalah property: patch di class, bukan di instance.
+    # max_upload_bytes is a property: patch it on the class, not the instance.
     monkeypatch.setattr(Settings, "max_upload_bytes", 4096)
 
     src = tmp_path / "besar.bin"
@@ -321,7 +321,7 @@ def test_quota_exceeded(live_server, agents_dir, tmp_path, monkeypatch):
     base = live_server.base_url
     a = register(base, "quota-a")
     b = register(base, "quota-b")
-    monkeypatch.setattr(settings, "max_storage_mb_per_agent", 1)  # kuota 1 MB
+    monkeypatch.setattr(settings, "max_storage_mb_per_agent", 1)  # 1 MB quota
 
     src = tmp_path / "gede.bin"
     src.write_bytes(os.urandom(2 * 1024 * 1024))
@@ -337,7 +337,7 @@ def test_quota_exceeded(live_server, agents_dir, tmp_path, monkeypatch):
 
 
 def test_mime_detected_from_content(live_server, agents_dir, tmp_path):
-    """PNG asli dengan content_type palsu: mime tersimpan adalah hasil deteksi."""
+    """A real PNG with a fake content_type: the stored mime is the detection result."""
     base = live_server.base_url
     a = register(base, "mime-a")
     b = register(base, "mime-b")
@@ -358,12 +358,12 @@ def test_mime_detected_from_content(live_server, agents_dir, tmp_path):
 
     assert r.status_code == 201
     data = r.json()["data"]
-    assert data["mime_type"] == "image/png"  # hasil deteksi, bukan klaim client
+    assert data["mime_type"] == "image/png"  # detection result, not the client claim
     assert data["declared_mime_type"] == "application/octet-stream"
 
 
 def test_csv_keeps_extension_mime(live_server, agents_dir, tmp_path):
-    """Teks polos tidak bisa dibedakan magic byte-nya; peta ekstensi menang."""
+    """Plain text cannot be distinguished by magic bytes; the extension map wins."""
     base = live_server.base_url
     a = register(base, "csv-a")
     b = register(base, "csv-b")
@@ -410,7 +410,7 @@ def test_strict_mime_match_rejects_mismatch(live_server, agents_dir, tmp_path, m
 
 
 def test_authorization_still_enforced(live_server, agents_dir, tmp_path):
-    """Konkurensi tidak boleh melemahkan otorisasi."""
+    """Concurrency must not weaken authorization."""
     base = live_server.base_url
     a = register(base, "auth-a")
     b = register(base, "auth-b")
@@ -418,7 +418,7 @@ def test_authorization_still_enforced(live_server, agents_dir, tmp_path):
     src = tmp_path / "x.bin"
     src.write_bytes(b"rahasia")
 
-    # C mencoba mengirim file direct ke B seolah-olah dari A: tanpa token A.
+    # C tries to send a direct file to B as if from A: without A's token.
     with open(src, "rb") as f:
         r = requests.post(
             f"{base}/upload-file",
@@ -431,7 +431,7 @@ def test_authorization_still_enforced(live_server, agents_dir, tmp_path):
                 "client_msg_id": str(uuid.uuid4()),
             },
         )
-    # Ini sah (C -> B); yang tidak boleh: tanpa token, atau ke diri sendiri.
+    # This is valid (C -> B); what must not be allowed: without a token, or to oneself.
     assert r.status_code == 201
 
     with open(src, "rb") as f:
@@ -459,7 +459,7 @@ def test_authorization_still_enforced(live_server, agents_dir, tmp_path):
                 "client_msg_id": str(uuid.uuid4()),
             },
         )
-    assert r.status_code == 400  # ke diri sendiri
+    assert r.status_code == 400  # to oneself
 
     from app.config import settings
 

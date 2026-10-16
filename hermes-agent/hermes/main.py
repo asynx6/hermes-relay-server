@@ -1,26 +1,26 @@
-"""CLI Hermes Agent.
+"""Hermes Agent CLI.
 
-Subperintah:
-    (tanpa argumen)   jalankan loop polling
-    poll              loop polling (sama seperti default)
-    fetch-once        satu siklus polling lalu keluar (untuk cron)
-    agents            daftar semua Hermes terdaftar (nama + ID)
-    groups            daftar semua grup + status keanggotaan kita
-    files [-n 50]     daftar file yang bisa diakses (nama, ID, ukuran)
-    download-file <file_id>   unduh file langsung dengan ID
-    send <target> <pesan...>
-    send-group <grup> <pesan...>
+Subcommands:
+    (no argument)     run the polling loop
+    poll              polling loop (same as default)
+    fetch-once        one polling cycle then exit (for cron)
+    agents            list all registered Hermes agents (name + ID)
+    groups            list all groups + our membership status
+    files [-n 50]     list accessible files (name, ID, size)
+    download-file <file_id>   download a file directly by ID
+    send <target> <message...>
+    send-group <group> <message...>
     send-file <target> <path> [caption...]
-    send-task <target> <payload...>   kirim tugas (RPC), tunggu hasil
-    receipts <id,id,...>              cek status penerimaan pesan kita
-    create-group <nama> [deskripsi]
-    join-group <nama>
+    send-task <target> <payload...>   send a task (RPC), wait for the result
+    receipts <id,id,...>              check the receipt status of our messages
+    create-group <name> [description]
+    join-group <name>
     history [n]
 
-Pertama kali dijalankan tanpa secret_key di config.json, agent otomatis
-memanggil /register (dengan nonce idempotency) dan menyimpan hasilnya.
-Loop polling dan fetch-once memakai file lock supaya tidak berjalan dua
-kali bersamaan untuk direktori agent yang sama.
+On first run without a secret_key in config.json, the agent automatically
+calls /register (with an idempotency nonce) and saves the result.
+The polling loop and fetch-once use a file lock so they do not run twice
+concurrently for the same agent directory.
 """
 import argparse
 import signal
@@ -41,7 +41,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
 
 def lock_path(args) -> Path:
-    """File lock untuk direktori config yang sama."""
+    """File lock for the same config directory."""
     return Path(args.config).resolve().parent / "data" / "hermes.lock"
 
 
@@ -56,11 +56,11 @@ def warn_insecure_transport(config: ClientConfig) -> None:
 
 
 def ensure_registered(config: ClientConfig) -> None:
-    """Auto-register kalau secret belum ada di config.
+    """Auto-register if the secret is not yet in config.
 
-    Mengirim `registration_nonce` yang persisten: kalau respons 201 hilang
-    karena timeout, percobaan berikutnya memutar secret yang sama alih-alih
-    mendapat 409 dan membakar nama agent.
+    Sends a persistent `registration_nonce`: if the 201 response is lost
+    due to a timeout, the next attempt replays the same secret instead of
+    getting a 409 and burning the agent name.
     """
     if config.registered:
         return
@@ -87,7 +87,7 @@ def open_memory(args) -> Memory:
 
 
 def resolve_agent(api, name: str) -> tuple[str, str]:
-    """Nama agent -> (agent_id, nama). Error jelas kalau belum terdaftar."""
+    """Agent name -> (agent_id, name). Clear error if not registered."""
     for a in api.list_agents():
         if a["name"].lower() == name.lower():
             return a["agent_id"], a["name"]
@@ -97,7 +97,7 @@ def resolve_agent(api, name: str) -> tuple[str, str]:
 
 
 def resolve_group(api, name: str) -> tuple[str, str]:
-    """Nama grup -> (group_id, nama). Error jelas kalau grup tidak ada."""
+    """Group name -> (group_id, name). Clear error if the group does not exist."""
     for g in api.list_groups():
         if g["name"].lower() == name.lower():
             return g["group_id"], g["name"]
@@ -109,8 +109,8 @@ def resolve_group(api, name: str) -> tuple[str, str]:
 def send_and_record(api: RelayAPI, memory: Memory, scope: str, peer: str,
                     peer_id: str, content: str, msg_type: str = "text",
                     file_id: str | None = None) -> dict:
-    """Simpan ke outbox (dengan ID peer), kirim, lalu tandai terkirim.
-    Aman untuk retry karena client_msg_id idempotent."""
+    """Save to the outbox (with the peer ID), send, then mark as sent.
+    Safe to retry because client_msg_id is idempotent."""
     client_msg_id = str(uuid.uuid4())
     memory.save_outgoing(scope, peer, peer_id, content, client_msg_id, msg_type, file_id)
     data = api.send_message(
@@ -155,7 +155,7 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
     data = api.upload_file(
         str(path), scope, target_id, target_name, client_msg_id, caption
     )
-    # Pesan file tersimpan sebagai pesan bertipe file dengan caption.
+    # The file message is stored as a file-type message with a caption.
     memory.save_outgoing(
         scope, target_name, target_id, caption or f"[file {path.name}]",
         client_msg_id, msg_type="text", file_id=data["file_id"],
@@ -181,7 +181,7 @@ def cmd_send_file(config, api, memory, file_handler, args) -> int:
 
 
 def cmd_upload_big(config, api, memory, args) -> int:
-    """Unggah file besar secara berpotong (chunked) dan resumable."""
+    """Upload a large file in chunks (chunked) and resumably."""
     path = Path(args.path)
     if not path.is_file():
         raise SystemExit(f"File tidak ditemukan: {path}")
@@ -306,7 +306,7 @@ def cmd_token_revoke(config, api, memory, args) -> int:
 
 def cmd_rotate_token(config, api, memory, args) -> int:
     data = api.rotate_token()
-    # Simpan otomatis ke config supaya client langsung memakai kunci baru.
+    # Save automatically to config so the client immediately uses the new key.
     config.save_registration(data["secret_key"])
     print(
         f"Kunci diputar. secret_key baru disimpan ke config.json. "
@@ -331,7 +331,7 @@ def cmd_history(config, api, memory, args) -> int:
 
 
 def cmd_list_agents(config, api, memory, args) -> int:
-    """Tampilkan semua Hermes terdaftar (discovery sebelum chat)."""
+    """Show all registered Hermes agents (discovery before chatting)."""
     agents = api.list_agents()
     if not agents:
         print("Belum ada agent terdaftar.")
@@ -344,7 +344,7 @@ def cmd_list_agents(config, api, memory, args) -> int:
 
 
 def cmd_list_groups(config, api, memory, args) -> int:
-    """Tampilkan semua grup + status keanggotaan agent ini."""
+    """Show all groups + this agent's membership status."""
     groups = api.list_groups()
     if not groups:
         print("Belum ada grup. Buat dengan: create-group <nama>")
@@ -368,7 +368,7 @@ def fmt_size(n) -> str:
 
 
 def cmd_list_files(config, api, memory, args) -> int:
-    """Tampilkan file yang bisa diakses agent ini (nama, ID, ukuran, dll)."""
+    """Show files this agent may access (name, ID, size, etc.)."""
     data = api.list_files(limit=args.n)
     files = data["files"]
     if not files:
@@ -388,7 +388,7 @@ def cmd_list_files(config, api, memory, args) -> int:
 
 
 def _find_file(api, file_id: str, max_pages: int = 20) -> dict | None:
-    """Cari metadata file (nama asli, ukuran, sha256) lewat daftar /files."""
+    """Find file metadata (original name, size, sha256) via the /files listing."""
     offset = 0
     for _ in range(max_pages):
         data = api.list_files(limit=50, offset=offset)
@@ -402,7 +402,7 @@ def _find_file(api, file_id: str, max_pages: int = 20) -> dict | None:
 
 
 def cmd_download_file(config, api, memory, file_handler, args) -> int:
-    """Unduh file langsung dengan file_id sebagai parameter."""
+    """Download a file directly with file_id as a parameter."""
     meta = _find_file(api, args.file_id)
     if meta is None:
         raise SystemExit(
@@ -419,9 +419,9 @@ def cmd_download_file(config, api, memory, file_handler, args) -> int:
 
 
 def _transport(config, args) -> dict:
-    """Opsi transport: SSE > long polling > polling biasa.
+    """Transport options: SSE > long polling > plain polling.
 
-    CLI (`--sse`/`--wait`) menimpa nilai config (`use_sse`/`poll_wait_seconds`).
+    The CLI (`--sse`/`--wait`) overrides the config values (`use_sse`/`poll_wait_seconds`).
     """
     use_sse = bool(getattr(args, "sse", False)) or bool(getattr(config, "use_sse", False))
     cli_wait = getattr(args, "wait", None)
@@ -468,8 +468,8 @@ def cmd_poll(config, api, memory, file_handler, args) -> int:
         "Ctrl+C untuk berhenti.",
         flush=True,
     )
-    # Satu instans per direktori agent: mencegah poll dan cron fetch-once
-    # berjalan bersamaan dengan cursor yang sama.
+    # One instance per agent directory: prevents poll and cron fetch-once
+    # from running concurrently with the same cursor.
     with instance_lock(lock_path(args)):
         try:
             poller.run()
@@ -480,10 +480,10 @@ def cmd_poll(config, api, memory, file_handler, args) -> int:
 
 
 def cmd_fetch_once(config, api, memory, file_handler, args) -> int:
-    """Satu siklus polling lalu keluar. Dibuat untuk dipanggil cron.
+    """One polling cycle then exit. Made to be invoked by cron.
 
-    Exit code: 0 = server merespons, 1 = server tidak merespons,
-    2 = token ditolak (perlu perhatian manusia).
+    Exit code: 0 = server responded, 1 = server did not respond,
+    2 = token rejected (needs human attention).
     """
     transport = _transport(config, args)
     poller = build_poller(
@@ -498,10 +498,10 @@ def cmd_fetch_once(config, api, memory, file_handler, args) -> int:
 
 
 def cmd_send_task(config, api, memory, args) -> int:
-    """Kirim tugas (msg_type=task) lalu tunggu hasil (msg_type=result).
+    """Send a task (msg_type=task) then wait for the result (msg_type=result).
 
-    Pola RPC ringan: satu task_id menghubungkan permintaan dan balasan.
-    CLI menunggu hasil sampai timeout sambil polling berkala.
+    Lightweight RPC pattern: a single task_id links the request and the reply.
+    The CLI waits for the result until timeout while polling periodically.
     """
     target_id, target_name = resolve_agent(api, args.target)
     task_id = args.task_id or f"task_{uuid.uuid4().hex[:16]}"
@@ -544,7 +544,7 @@ def cmd_send_task(config, api, memory, args) -> int:
 
 
 def cmd_receipts(config, api, memory, args) -> int:
-    """Cek status penerimaan pesan yang kita kirim."""
+    """Check the receipt status of the messages we sent."""
     ids = [int(x) for x in args.message_ids.split(",") if x.strip()]
     receipts = api.receipts(ids)
     if not receipts:

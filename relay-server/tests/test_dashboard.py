@@ -1,4 +1,4 @@
-"""Test dashboard admin: login JWT, agent, chat, dan file manager."""
+"""Tests for the admin dashboard: JWT login, agents, chat, and file manager."""
 import hashlib
 import os
 import time
@@ -15,7 +15,7 @@ API = "/api/v1/dashboard"
 
 @pytest.fixture(autouse=True)
 def _relax_login_limit(monkeypatch):
-    """Login limit produksi 10/menit terlalu ketat untuk rangkaian test."""
+    """The production login limit of 10/minute is too strict for the test suite."""
     monkeypatch.setattr("app.config.settings.rate_limit_login", "1000/minute")
 
 
@@ -27,7 +27,7 @@ def test_login_default_password(client):
     r = login(client)
     assert r.status_code == 200
     assert r.json()["data"]["session_seconds"] > 0
-    # Cookie HttpOnly sesi terpasang.
+    # Session HttpOnly cookie is set.
     assert "hermes_dashboard" in r.cookies
 
     r = client.get(f"{API}/me")
@@ -85,7 +85,7 @@ def test_change_password_too_short(client):
         f"{API}/change-password",
         json={"old_password": "123456", "new_password": "123"},
     )
-    assert r.status_code == 422  # validasi Pydantic (min 6 karakter)
+    assert r.status_code == 422  # Pydantic validation (min 6 characters)
 
 
 def test_expired_token_rejected(client):
@@ -134,7 +134,7 @@ def test_direct_conversation_view(client):
     c = register_agent(client, "hermes-c")
     send(client, a["secret_key"], "direct", "hermes-b", "pesan 1")
     send(client, b["secret_key"], "direct", "hermes-a", "balasan 2")
-    # Pesan dari C ke pihak lain tidak boleh muncul di thread A-B.
+    # A message from C to another party must not appear in the A-B thread.
     send(client, c["secret_key"], "direct", "hermes-b", "pesan C")
 
     login(client)
@@ -155,14 +155,14 @@ def test_conversation_unknown_agent(client):
 
 
 def test_conversation_thread_pagination(client):
-    """Thread percakapan bisa dipaginasi; urutan tetap kronologis."""
+    """Conversation threads can be paginated; order stays chronological."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     for i in range(5):
         send(client, a["secret_key"], "direct", "hermes-b", f"pesan {i}")
 
     login(client)
-    # Halaman pertama (terbaru 2) -> pesan 3, 4 dalam urutan kronologis.
+    # First page (latest 2) -> messages 3, 4 in chronological order.
     page1 = client.get(
         f"{API}/conversations/hermes-a/hermes-b", params={"limit": 2, "offset": 0}
     ).json()["data"]
@@ -170,7 +170,7 @@ def test_conversation_thread_pagination(client):
     assert page1["total"] == 5
     assert page1["has_more"] is True
 
-    # Halaman berikutnya mengambil mundur ke masa lalu.
+    # The next page walks backwards into the past.
     page2 = client.get(
         f"{API}/conversations/hermes-a/hermes-b", params={"limit": 2, "offset": 2}
     ).json()["data"]
@@ -185,7 +185,7 @@ def test_conversation_thread_pagination(client):
 
 
 def test_dashboard_files_pagination(client, tmp_path):
-    """Daftar file dashboard punya total/limit/offset/has_more."""
+    """The dashboard file list has total/limit/offset/has_more."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     for i in range(3):
@@ -288,11 +288,11 @@ def test_files_list_download_delete(client, tmp_path):
     assert r.content == payload
     assert r.headers["x-content-type-options"] == "nosniff"
 
-    # Download count naik lewat dashboard.
+    # Download count increases via the dashboard.
     files = client.get(f"{API}/files").json()["data"]["files"]
     assert files[0]["download_count"] == 1
 
-    # Hapus: file hilang dari disk, status jadi deleted_at.
+    # Delete: file disappears from disk, status becomes deleted_at.
     r = client.delete(f"{API}/files/{stored_name}")
     assert r.status_code == 200
     from app.config import settings
@@ -303,9 +303,9 @@ def test_files_list_download_delete(client, tmp_path):
     assert files[0]["deleted_at"] is not None
     assert files[0]["exists_on_disk"] is False
 
-    # Download setelah hapus -> 410 (konsisten dengan API agent).
+    # Download after delete -> 410 (consistent with the agent API).
     assert client.get(f"{API}/files/{stored_name}/download").status_code == 410
-    # Hapus dua kali -> 409.
+    # Delete twice -> 409.
     assert client.delete(f"{API}/files/{stored_name}").status_code == 409
 
 
@@ -318,7 +318,7 @@ def test_file_download_unknown(client):
 def test_file_view_requires_session(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
-    src = Path(__file__)  # file apa pun
+    src = Path(__file__)  # any file
     with open(src, "rb") as f:
         client.post(
             "/api/v1/upload-file",
@@ -370,7 +370,7 @@ def test_file_message_metadata_in_chat_views(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Kirim pesan & kelola grup dari dashboard
+# Send messages & manage groups from the dashboard
 # ---------------------------------------------------------------------------
 
 def test_dashboard_send_direct(client):
@@ -391,7 +391,7 @@ def test_dashboard_send_direct(client):
     assert r.status_code == 201
     assert r.json()["data"]["from"] == "hermes-a"
 
-    # Penerima benar-benar menerima lewat API agent (bukan cuma tampil di dashboard).
+    # The recipient truly receives it via the agent API (not just shown in the dashboard).
     msgs = fetch(client, b["secret_key"])["messages"]
     assert len(msgs) == 1
     assert msgs[0]["content"] == "Halo dari dashboard"
@@ -479,7 +479,7 @@ def test_dashboard_send_requires_session(client):
 
 
 def test_dashboard_group_full_flow(client):
-    """Buat grup, agent gabung, kirim pesan grup — semuanya dari dashboard."""
+    """Create a group, an agent joins, send a group message — all from the dashboard."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     login(client)
@@ -493,21 +493,21 @@ def test_dashboard_group_full_flow(client):
     dash_group_id = r.json()["data"]["group_id"]
     assert dash_group_id.startswith("gr_")
 
-    # Pembuat otomatis anggota; cek lewat daftar grup.
+    # The creator is automatically a member; check via the group list.
     groups = client.get(f"{API}/groups").json()["data"]["groups"]
     assert groups[0]["members"] == ["hermes-a"]
     assert groups[0]["group_id"] == dash_group_id
 
-    # B gabung lewat dashboard.
+    # B joins via the dashboard.
     r = client.post(f"{API}/groups/tim-dash/join", json={"as_agent": "hermes-b"})
     assert r.status_code == 200
     assert r.json()["data"]["already_member"] is False
 
-    # Join ulang: idempotent.
+    # Join again: idempotent.
     r = client.post(f"{API}/groups/tim-dash/join", json={"as_agent": "hermes-b"})
     assert r.json()["data"]["already_member"] is True
 
-    # A kirim pesan grup lewat dashboard.
+    # A sends a group message via the dashboard.
     r = client.post(
         f"{API}/send-message",
         json={
@@ -520,13 +520,13 @@ def test_dashboard_group_full_flow(client):
     )
     assert r.status_code == 201
 
-    # B menerima lewat API agent; A (pengirim) tidak.
+    # B receives via the agent API; A (the sender) does not.
     msgs = fetch(client, b["secret_key"])["messages"]
     assert [m["content"] for m in msgs] == ["Update dari dashboard"]
     assert msgs[0]["group"] == "tim-dash"
     assert fetch(client, a["secret_key"])["messages"] == []
 
-    # Tampilan grup di dashboard menampilkan pesan dan anggota.
+    # The dashboard group view shows the messages and members.
     data = client.get(f"{API}/groups/tim-dash/messages").json()["data"]
     assert [m["content"] for m in data["messages"]] == ["Update dari dashboard"]
     groups = client.get(f"{API}/groups").json()["data"]["groups"]

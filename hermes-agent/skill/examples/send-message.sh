@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Kirim pesan direct lewat CLI Hermes Agent. Bisa dipanggil dari skrip lain,
-# git hook, atau cron kalau perlu notifikasi terjadwal.
+# Send a direct message via the Hermes Agent CLI. Can be called from other
+# scripts, git hooks, or cron for scheduled notifications.
 #
-# Pakai:
-#   ./send-message.sh hermes-beta "Laporan Q3 sudah siap"
+# Usage:
+#   ./send-message.sh hermes-beta "Q3 report is ready"
 #
-# Variabel opsional:
-#   HERMES_CONFIG  path config.json (default: config.json di paket)
-#   HERMES_PYTHON  interpreter python (default: python3)
+# Optional variables:
+#   HERMES_CONFIG  path to config.json (default: config.json in the package)
+#   HERMES_PYTHON  python interpreter (default: python3)
 set -eu
 
 if [ "$#" -lt 2 ]; then
-  echo "Pakai: $0 <target-agent> <pesan...>" >&2
+  echo "Pakai: $0 <target-agent> <message...>" >&2
   exit 64
 fi
 

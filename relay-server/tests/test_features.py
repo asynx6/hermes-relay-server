@@ -1,9 +1,9 @@
-"""Tes fitur roadmap #1/#2/#3/#5.
+"""Tests for roadmap features #1/#2/#3/#5.
 
-#1 Long polling & SSE      — latensi & jumlah request
-#2 Kelola grup lanjutan    — role, join_code, leave/kick, mention
-#3 Keamanan token          — scope, rotasi + grace, audit log
-#5 Unggahan berpotong      — chunked, resumable, dedupe SHA-256
+#1 Long polling & SSE      — latency & request count
+#2 Advanced group mgmt     — role, join_code, leave/kick, mention
+#3 Token security          — scope, rotation + grace, audit log
+#5 Chunked upload          — chunked, resumable, SHA-256 dedupe
 """
 import hashlib
 import json
@@ -58,7 +58,7 @@ def _send_direct(base: str, secret: str, target_id: str, target_name: str,
 
 
 # ===========================================================================
-# #3 Keamanan token: scope, rotasi, audit
+# #3 Token security: scope, rotation, audit
 # ===========================================================================
 
 
@@ -75,16 +75,16 @@ def test_scoped_token_limits_endpoints(client):
     scoped = r.json()["data"]["secret_key"]
     assert scoped.startswith("hsk_")
 
-    # Boleh: baca pesan.
+    # Allowed: read messages.
     assert client.get(f"{API}/fetch-messages", headers=auth(scoped)).status_code == 200
-    # Ditolak: kirim pesan (butuh messages:write).
+    # Denied: send message (requires messages:write).
     r = client.post(
         f"{API}/send-message", headers=auth(scoped),
         json=_payload(b["agent_id"], "tok-b"),
     )
     assert r.status_code == 403
     assert r.json()["code"] == "FORBIDDEN"
-    # Ditolak: unggah file.
+    # Denied: upload a file.
     r = client.post(
         f"{API}/upload/init", headers=auth(scoped),
         json={
@@ -96,7 +96,7 @@ def test_scoped_token_limits_endpoints(client):
     )
     assert r.status_code == 403
 
-    # Token utama tetap akses penuh.
+    # The main token still has full access.
     assert client.post(
         f"{API}/send-message", headers=auth(a["secret_key"]),
         json=_payload(b["agent_id"], "tok-b"),
@@ -117,10 +117,10 @@ def test_token_revoke_and_unknown_scope(client):
     assert client.delete(
         f"{API}/tokens/{token_id}", headers=auth(a["secret_key"])
     ).status_code == 200
-    # Setelah dicabut -> 401.
+    # After revocation -> 401.
     assert client.get(f"{API}/files", headers=auth(secret)).status_code == 401
 
-    # Scope tak dikenal ditolak validasi.
+    # Unknown scope is rejected by validation.
     r = client.post(
         f"{API}/tokens", headers=auth(a["secret_key"]),
         json={"scopes": ["scope:ngawur"]},
@@ -137,10 +137,10 @@ def test_rotate_token_grace_keeps_old_key(client):
     new = r.json()["data"]["secret_key"]
     assert new != old
 
-    # Kunci baru langsung berlaku; kunci lama masih dalam jendela grace.
+    # The new key takes effect immediately; the old key is still in the grace window.
     assert client.get(f"{API}/agents", headers=auth(new)).status_code == 200
     assert client.get(f"{API}/agents", headers=auth(old)).status_code == 200
-    # Kunci ngawur tetap ditolak.
+    # A nonsense key is still rejected.
     assert client.get(f"{API}/agents", headers=auth("hsk_ngawur")).status_code == 401
 
 
@@ -178,14 +178,14 @@ def test_audit_log_records_admin_actions(client):
 
 def test_audit_log_records_failed_login(client):
     _login(client, "password-salah")
-    _login(client)  # login benar agar sesi valid
+    _login(client)  # correct login so the session is valid
     data = client.get(f"{API}/dashboard/audit").json()["data"]
     entry = next(e for e in data["entries"] if e["action"] == "login_failed")
     assert entry["result"] == "denied"
 
 
 # ===========================================================================
-# #2 Kelola grup: role, join_code, leave/kick, mention
+# #2 Group management: role, join_code, leave/kick, mention
 # ===========================================================================
 
 
@@ -201,7 +201,7 @@ def test_group_creator_is_admin_and_members_listed(client):
     ).json()["data"]
     roles = {m["name"]: m["role"] for m in data["members"]}
     assert roles == {"grp-a": "admin", "grp-b": "member"}
-    # Admin tampil lebih dulu.
+    # Admin is listed first.
     assert data["members"][0]["name"] == "grp-a"
 
 
@@ -226,16 +226,16 @@ def test_join_code_required_and_accepted(client):
     code = r.json()["data"]["join_code"]
     assert code
 
-    # Tanpa kode -> 403.
+    # Without a code -> 403.
     assert client.post(
         f"{API}/groups/tertutup/join", headers=auth(b["secret_key"])
     ).status_code == 403
-    # Kode salah -> 403.
+    # Wrong code -> 403.
     assert client.post(
         f"{API}/groups/tertutup/join", headers=auth(b["secret_key"]),
         json={"join_code": "salah-salah"},
     ).status_code == 403
-    # Kode benar -> 200.
+    # Correct code -> 200.
     r = client.post(
         f"{API}/groups/tertutup/join", headers=auth(b["secret_key"]),
         json={"join_code": code},
@@ -243,7 +243,7 @@ def test_join_code_required_and_accepted(client):
     assert r.status_code == 200
     assert r.json()["data"]["already_member"] is False
 
-    # Dikosongkan -> kembali terbuka.
+    # Cleared -> back to open.
     assert client.delete(
         f"{API}/groups/tertutup/join-code", headers=auth(a["secret_key"])
     ).status_code == 200
@@ -261,13 +261,13 @@ def test_kick_requires_admin_and_protects_last_admin(client):
     join_group(client, b["secret_key"], "kick-grup")
     join_group(client, c["secret_key"], "kick-grup")
 
-    # Anggota biasa tidak boleh kick.
+    # A regular member cannot kick.
     r = client.delete(
         f"{API}/groups/kick-grup/members/kick-c", headers=auth(b["secret_key"])
     )
     assert r.status_code == 403
 
-    # Admin boleh kick anggota biasa.
+    # Admin can kick a regular member.
     r = client.delete(
         f"{API}/groups/kick-grup/members/kick-c", headers=auth(a["secret_key"])
     )
@@ -280,7 +280,7 @@ def test_kick_requires_admin_and_protects_last_admin(client):
     ]
     assert "kick-c" not in names
 
-    # Admin terakhir tidak bisa menurunkan dirinya sendiri.
+    # The last admin cannot demote themselves.
     r = client.put(
         f"{API}/groups/kick-grup/members/kick-a/role",
         headers=auth(a["secret_key"]), json={"role": "member"},
@@ -294,11 +294,11 @@ def test_leave_group_and_last_admin_guard(client):
     create_group(client, a["secret_key"], "lv-grup")
     join_group(client, b["secret_key"], "lv-grup")
 
-    # Admin terakhir tidak boleh keluar selama masih ada anggota lain.
+    # The last admin may not leave while other members remain.
     r = client.post(f"{API}/groups/lv-grup/leave", headers=auth(a["secret_key"]))
     assert r.status_code == 409
 
-    # Angkat b jadi admin, lalu a boleh keluar.
+    # Promote b to admin, then a may leave.
     assert client.put(
         f"{API}/groups/lv-grup/members/lv-b/role",
         headers=auth(a["secret_key"]), json={"role": "admin"},
@@ -307,7 +307,7 @@ def test_leave_group_and_last_admin_guard(client):
         f"{API}/groups/lv-grup/leave", headers=auth(a["secret_key"])
     ).status_code == 200
 
-    # b sekarang admin terakhir dan satu-satunya -> boleh keluar.
+    # b is now the last and only admin -> may leave.
     assert client.post(
         f"{API}/groups/lv-grup/leave", headers=auth(b["secret_key"])
     ).status_code == 200
@@ -326,7 +326,7 @@ def test_mention_recorded_for_group_member(client):
     msgs = fetch(client, b["secret_key"])["messages"]
     assert msgs[0]["mentions"] == ["mn-b"]
 
-    # Mention ke non-anggota (dan non-agent) diabaikan.
+    # Mentions to non-members (and non-agents) are ignored.
     send(
         client, a["secret_key"], "group", "mn-grup",
         "@orang-luar halo", target_id=g["group_id"],
@@ -336,7 +336,7 @@ def test_mention_recorded_for_group_member(client):
 
 
 # ===========================================================================
-# #5 Unggahan berpotong: chunked, resumable, dedupe
+# #5 Chunked upload: chunked, resumable, dedupe
 # ===========================================================================
 
 
@@ -399,7 +399,7 @@ def test_chunked_upload_resume_reports_missing(client):
     init = _init_upload(client, a["secret_key"], payload, b["agent_id"], "rs-b", 1000)
     uid = init["upload_id"]
 
-    # Kirim chunk 0 dan 2, lewatkan 1.
+    # Send chunks 0 and 2, skip 1.
     assert _put_chunk(client, a["secret_key"], uid, 0, payload[0:1000]).status_code == 200
     assert _put_chunk(client, a["secret_key"], uid, 2, payload[2000:2500]).status_code == 200
 
@@ -407,12 +407,12 @@ def test_chunked_upload_resume_reports_missing(client):
     assert state["missing"] == [1]
     assert state["complete"] is False
 
-    # Complete sebelum lengkap -> 409.
+    # Complete before it is complete -> 409.
     assert client.post(
         f"{API}/upload/{uid}/complete", headers=auth(a["secret_key"])
     ).status_code == 409
 
-    # Kirim sisa, lalu complete.
+    # Send the remainder, then complete.
     assert _put_chunk(client, a["secret_key"], uid, 1, payload[1000:2000]).status_code == 200
     done = client.post(f"{API}/upload/{uid}/complete", headers=auth(a["secret_key"]))
     assert done.status_code == 201, done.text
@@ -433,7 +433,7 @@ def test_chunked_upload_dedupe_skips_transfer(client):
     assert done1.status_code == 201
     assert done1.json()["data"]["deduplicated"] is False
 
-    # Isi sama, client_msg_id baru: server menandai duplikat, 0 chunk dikirim.
+    # Same content, new client_msg_id: the server marks it duplicate, 0 chunks sent.
     second = _init_upload(client, a["secret_key"], payload, b["agent_id"], "dd-b", 1024)
     assert second["deduplicated"] is True
 
@@ -444,7 +444,7 @@ def test_chunked_upload_dedupe_skips_transfer(client):
     assert done2.json()["data"]["deduplicated"] is True
     assert done2.json()["data"]["file_id"] != done1.json()["data"]["file_id"]
 
-    # Dua baris, tapi isi di disk dibagi (hardlink) -> unduhan tetap utuh.
+    # Two rows, but the content on disk is shared (hardlink) -> downloads stay intact.
     for fid in (done1.json()["data"]["file_id"], done2.json()["data"]["file_id"]):
         dl = client.get(f"{API}/download-file/{fid}", headers=auth(b["secret_key"]))
         assert dl.content == payload
@@ -456,7 +456,7 @@ def test_chunked_upload_checksum_mismatch(client):
     payload = os.urandom(1500)
     init = _init_upload(
         client, a["secret_key"], payload, b["agent_id"], "ck-b", 1000,
-        sha="a" * 64,  # sengaja salah
+        sha="a" * 64,  # intentionally wrong
     )
     uid = init["upload_id"]
     _put_chunk(client, a["secret_key"], uid, 0, payload[0:1000])
@@ -501,7 +501,6 @@ def test_chunked_upload_abort(client):
 # #1 Long polling & SSE
 # ===========================================================================
 
-
 def test_long_poll_returns_immediately_when_message_ready(client):
     a = register_agent(client, "lp-a")
     b = register_agent(client, "lp-b")
@@ -537,7 +536,7 @@ def test_sse_can_be_disabled(client, monkeypatch):
 
 
 def test_long_poll_waits_then_delivers(live_server, agents_dir):
-    """Request ditahan sampai pesan baru tiba, lalu langsung dibalas."""
+    """The request is held until a new message arrives, then answered immediately."""
     base = live_server.base_url
     a = _register(base, "lpw-a")
     b = _register(base, "lpw-b")
@@ -560,7 +559,7 @@ def test_long_poll_waits_then_delivers(live_server, agents_dir):
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     assert started.wait(5)
-    time.sleep(1.5)  # beri waktu request benar-benar ditahan di server
+    time.sleep(1.5)  # give the request time to actually be held on the server
     _send_direct(base, b["secret_key"], a["agent_id"], "lpw-a", "bangun")
     thread.join(timeout=30)
 
@@ -591,7 +590,7 @@ def test_sse_streams_new_message(live_server, agents_dir):
                     if raw.startswith("event:"):
                         event = raw[6:].strip()
                         if event == "epoch":
-                            connected.set()  # koneksi siap; aman mengirim
+                            connected.set()  # connection ready; safe to send
                     elif raw.startswith("data:") and event == "messages":
                         got["payload"] = json.loads(raw[5:].strip())
                         return

@@ -1,24 +1,24 @@
-"""Unggahan berpotong (chunked) + resumable + dedupe berdasarkan SHA-256.
+"""Chunked + resumable uploads with dedupe based on SHA-256.
 
-Alur:
+Flow:
 
-    POST /upload/init                  -> buka sesi, dapat upload_id
-    PUT  /upload/{id}/chunk?index=N    -> kirim satu chunk (raw body)
-    GET  /upload/{id}                  -> status: chunk mana yang sudah ada
-    POST /upload/{id}/complete         -> rakit, verifikasi, commit atomik
-    DELETE /upload/{id}                -> batalkan sesi
+    POST /upload/init                  -> open a session, get an upload_id
+    PUT  /upload/{id}/chunk?index=N    -> send one chunk (raw body)
+    GET  /upload/{id}                  -> status: which chunks are present
+    POST /upload/{id}/complete         -> assemble, verify, atomic commit
+    DELETE /upload/{id}                -> cancel the session
 
-Kenapa begini:
-- **Resumable** — server mencatat index chunk yang sudah diterima, jadi
-  client yang koneksinya putus di chunk ke-7 cukup mengirim chunk 7..N.
-- **Dedupe** — kalau server sudah punya file dengan SHA-256 + ukuran yang
-  sama (dan boleh dilihat agent ini), `/init` menandai `deduplicated` dan
-  client bisa langsung `/complete` tanpa mengirim satu byte pun.
-- **Integritas** — chunk dirakit lalu diverifikasi SHA-256 total + ukuran
-  sebelum `os.replace` atomik. Chunk yang salah tidak pernah jadi file final.
+Why this design:
+- **Resumable** — the server records the chunk indexes already received, so a
+  client whose connection drops at chunk 7 only needs to send chunks 7..N.
+- **Dedupe** — if the server already has a file with the same SHA-256 + size
+  (and this agent may see it), `/init` marks `deduplicated` and the client can
+  go straight to `/complete` without sending a single byte.
+- **Integrity** — chunks are assembled and then verified for total SHA-256 +
+  size before the atomic `os.replace`. A bad chunk never becomes the final file.
 
-Chunk disimpan di `filemanager/.staging/<upload_id>/chunk_<n>`; sesi yang
-ditinggalkan disapu oleh `scripts/cleanup.py` setelah `CHUNK_SESSION_HOURS`.
+Chunks are stored in `filemanager/.staging/<upload_id>/chunk_<n>`; abandoned
+sessions are swept by `scripts/cleanup.py` after `CHUNK_SESSION_HOURS`.
 """
 import hashlib
 import math
@@ -38,7 +38,7 @@ from ..services import file_service, message_service
 router = APIRouter()
 
 
-# --- helper sesi -----------------------------------------------------------
+# --- session helpers -----------------------------------------------------------
 
 
 def _session_dir(upload_id: str):
@@ -78,7 +78,7 @@ def upload_init(
     request: Request,
     agent=Depends(require_scope("files:write")),
 ):
-    """Buka sesi unggah berpotong dan (kalau ada) tandai duplikat."""
+    """Open a chunked upload session and (if any) flag a duplicate."""
     if body.total_size > settings.max_chunked_bytes:
         raise api_error(
             413,
@@ -93,7 +93,7 @@ def upload_init(
         )
 
     original_name = file_service.sanitize_filename(body.original_name)
-    ext = file_service.safe_extension(original_name)  # 415 sebelum menerima chunk
+    ext = file_service.safe_extension(original_name)  # 415 before accepting chunks
 
     total_chunks = math.ceil(body.total_size / body.chunk_size)
     if total_chunks > 100_000:
@@ -103,7 +103,7 @@ def upload_init(
     try:
         begin_immediate(conn)
 
-        # Idempotency: sesi terbuka dengan client_msg_id yang sama dikembalikan.
+        # Idempotency: an open session with the same client_msg_id is returned.
         existing = conn.execute(
             "SELECT * FROM upload_sessions WHERE agent_id = ? AND client_msg_id = ? "
             "AND status = 'open'",
@@ -179,7 +179,7 @@ def upload_init(
 def upload_status(
     upload_id: str, request: Request, agent=Depends(require_scope("files:write"))
 ):
-    """Status sesi: chunk mana yang sudah diterima dan mana yang masih kurang."""
+    """Session status: which chunks have been received and which are still missing."""
     conn = connect()
     try:
         row = _load_session(conn, upload_id, agent["id"])
@@ -209,9 +209,9 @@ async def upload_chunk(
     index: int = Query(..., ge=0),
     agent=Depends(require_scope("files:write")),
 ):
-    """Terima satu chunk (raw body, `application/octet-stream`).
+    """Receive one chunk (raw body, `application/octet-stream`).
 
-    Aman diulang: mengirim ulang chunk yang sama hanya menimpa berkasnya.
+    Safe to repeat: resending the same chunk just overwrites its file.
     """
     conn = connect()
     try:
@@ -272,7 +272,7 @@ async def upload_chunk(
 
 
 def _assemble(upload_id: str, total_chunks: int, declared_sha: str, declared_size: int):
-    """Rakit chunk jadi satu file staging, sambil menghitung ukuran + SHA-256."""
+    """Assemble chunks into a single staging file, computing size + SHA-256 along the way."""
     session_dir = _session_dir(upload_id)
     part = session_dir / "assembled.part"
     digest = hashlib.sha256()
@@ -309,7 +309,7 @@ def _assemble(upload_id: str, total_chunks: int, declared_sha: str, declared_siz
 def upload_complete(
     upload_id: str, request: Request, agent=Depends(require_scope("files:write"))
 ):
-    """Rakit chunk, verifikasi, lalu commit sebagai file + pesan."""
+    """Assemble chunks, verify, then commit as a file + message."""
     conn = connect()
     try:
         row = _load_session(conn, upload_id, agent["id"])
@@ -323,7 +323,7 @@ def upload_complete(
     received = _parse_received(row["received"])
     missing = sorted(set(range(row["total_chunks"])) - received)
 
-    # Jalur dedupe: server sudah punya isi yang sama -> tidak perlu chunk.
+    # Dedupe path: the server already has identical content -> no chunks needed.
     conn = connect()
     try:
         dedupe = file_service.dedupe_source(
@@ -359,7 +359,7 @@ def upload_complete(
                 )
         mime = file_service.resolve_mime(detected, row["mime_type"], original_name)
     else:
-        # Isi identik sudah ada: pakai mime yang sudah tersimpan untuk file itu.
+        # Identical content already exists: use the mime already stored for that file.
         mime = dedupe["mime_type"] or "application/octet-stream"
 
     conn = connect()
@@ -368,7 +368,7 @@ def upload_complete(
     try:
         begin_immediate(conn)
 
-        # Duplikat client_msg_id: balas pesan lama (idempotent).
+        # Duplicate client_msg_id: reply with the old message (idempotent).
         existing = conn.execute(
             """SELECT fl.*, m.id AS message_id FROM file_logs fl
                JOIN messages m ON m.file_id = fl.file_id
@@ -499,7 +499,7 @@ def upload_complete(
 def upload_abort(
     upload_id: str, request: Request, agent=Depends(require_scope("files:write"))
 ):
-    """Batalkan sesi unggah dan buang chunk yang sudah diterima."""
+    """Cancel the upload session and discard the chunks already received."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -518,5 +518,5 @@ def upload_abort(
 
 
 def _cleanup_session(upload_id: str) -> None:
-    """Buang direktori chunk sesi (best-effort)."""
+    """Discard the session chunk directory (best-effort)."""
     shutil.rmtree(_session_dir(upload_id), ignore_errors=True)

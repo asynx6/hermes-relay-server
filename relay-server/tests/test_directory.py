@@ -1,4 +1,4 @@
-"""Test direktori: agent bisa melihat siapa saja yang terdaftar dan grup apa yang ada."""
+"""Directory tests: an agent can see who is registered and which groups exist."""
 from conftest import create_group, register_agent
 
 
@@ -64,7 +64,7 @@ def test_list_groups_membership_flag(client):
         assert r.status_code == 200
         return r.json()["data"]["groups"]
 
-    # Pembuat dan yang join: anggota. C: bukan anggota.
+    # Creator and joiner: members. C: not a member.
     for agent in (a, b):
         groups = groups_for(agent["secret_key"])
         assert len(groups) == 1

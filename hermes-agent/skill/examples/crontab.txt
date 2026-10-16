@@ -1,23 +1,23 @@
-# Contoh crontab untuk Hermes Agent (polling pesan masuk).
+# Example crontab for Hermes Agent (incoming message polling).
 #
-# Pasang: crontab -e, lalu salin baris di bawah (sesuaikan path).
-# Log disimpan di data/cron.log supaya bisa diaudit kalau ada masalah.
+# Install: crontab -e, then copy the lines below (adjust the paths).
+# Logs are stored in data/cron.log so they can be audited if something goes wrong.
 
-# --- Pesan masuk (GET /fetch-messages) setiap menit -------------------------
+# --- Incoming messages (GET /fetch-messages) every minute --------------------
 * * * * * /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
 
-# --- Alternatif: setiap 5 menit (lebih hemat, latensi pesan sampai 5 menit) --
+# --- Alternative: every 5 minutes (cheaper, message latency up to 5 minutes) --
 # */5 * * * * /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
 
-# --- Alternatif: setiap menit di jam kerja saja ------------------------------
+# --- Alternative: every minute during working hours only ---------------------
 # * 8-18 * * 1-5 /home/user/hermes-agent/skill/examples/fetch-once.sh >> /home/user/hermes-agent/data/cron.log 2>&1
 
-# Catatan:
-# - Cron minimum interval 1 menit. Untuk polling lebih cepat (detik),
-#   jalankan proses panjang: nohup python -m hermes.main poll >> data/poll.log 2>&1 &
-# - Jangan jalankan cron DAN proses panjang untuk agent yang sama; cursor
-#   last_message_id bisa balapan dan pesan bisa terlewat.
-# - fetch-once exit code: 0=ok, 1=server mati, 2=token ditolak (401).
-#   Kalau sistem mengirim email untuk exit != 0, alert langsung berarti.
-# - Log berkembang terus; rotasi dengan logrotate atau bersihkan berkala:
+# Notes:
+# - Cron minimum interval is 1 minute. For faster polling (seconds),
+#   run a long-running process: nohup python -m hermes.main poll >> data/poll.log 2>&1 &
+# - Do not run cron AND a long-running process for the same agent; the cursor
+#   last_message_id can race and messages can be missed.
+# - fetch-once exit code: 0=ok, 1=server down, 2=token rejected (401).
+#   If the system sends email for exit != 0, the alert is immediately meaningful.
+# - The log keeps growing; rotate it with logrotate or clear it periodically:
 #   0 0 * * 0 truncate -s 0 /home/user/hermes-agent/data/cron.log

@@ -1,4 +1,4 @@
-"""Kelola token agent: token ber-scope, pencabutan, dan rotasi kunci utama."""
+"""Manage agent tokens: scoped tokens, revocation, and primary key rotation."""
 import json
 import secrets
 
@@ -32,11 +32,11 @@ def _client_ip(request: Request) -> str | None:
 def create_token(
     body: CreateTokenRequest, request: Request, agent=Depends(get_current_agent)
 ):
-    """Buat token sekunder ber-scope untuk agent pemanggil.
+    """Create a scoped secondary token for the calling agent.
 
-    Berguna untuk menaruh kredensial di tempat yang kurang aman (mis. token
-    baca-saja), atau membatasi token ke satu jenis operasi. Secret hanya
-    ditampilkan sekali di respons ini.
+    Useful for placing credentials somewhere less safe (e.g. a read-only
+    token), or limiting a token to a single kind of operation. The secret is
+    shown only once in this response.
     """
     secret = generate_secret()
     conn = connect()
@@ -91,7 +91,7 @@ def create_token(
 @router.get("/tokens")
 @limiter.limit(lambda: settings.rate_limit_default)
 def list_tokens(request: Request, agent=Depends(get_current_agent)):
-    """Daftar token sekunder milik agent ini (tanpa secret)."""
+    """List of secondary tokens owned by this agent (without the secret)."""
     conn = connect()
     try:
         rows = conn.execute(
@@ -123,7 +123,7 @@ def list_tokens(request: Request, agent=Depends(get_current_agent)):
 @router.delete("/tokens/{token_id}")
 @limiter.limit(lambda: settings.rate_limit_default)
 def revoke_token(token_id: str, request: Request, agent=Depends(get_current_agent)):
-    """Cabut satu token sekunder. Token utama tidak bisa dicabut di sini."""
+    """Revoke a single secondary token. The primary token cannot be revoked here."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -154,11 +154,11 @@ def revoke_token(token_id: str, request: Request, agent=Depends(get_current_agen
 @router.post("/rotate-token")
 @limiter.limit(lambda: settings.rate_limit_default)
 def rotate_token(request: Request, agent=Depends(get_current_agent)):
-    """Putar kunci utama agent.
+    """Rotate the agent's primary key.
 
-    Kunci lama tetap diterima selama `TOKEN_GRACE_MINUTES` (default 5 menit),
-    jadi client yang sedang berjalan punya waktu menukar kunci tanpa putus.
-    Setelah grace habis, kunci lama otomatis ditolak (401).
+    The old key is still accepted for `TOKEN_GRACE_MINUTES` (default 5 minutes),
+    so a running client has time to swap the key without interruption.
+    After the grace period ends, the old key is automatically rejected (401).
     """
     new_secret = generate_secret()
     conn = connect()
@@ -180,7 +180,7 @@ def rotate_token(request: Request, agent=Depends(get_current_agent)):
                 "DELETE FROM token_rotation_grace WHERE agent_id = ?", (agent["id"],)
             )
 
-        # Baris grace kedaluwarsa dibersihkan sekalian.
+        # Expired grace rows are cleaned up as well.
         conn.execute(
             "DELETE FROM token_rotation_grace WHERE expires_at < "
             "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"

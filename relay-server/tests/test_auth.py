@@ -1,4 +1,4 @@
-"""Test autentikasi dan registrasi (Fase 1)."""
+"""Tests for authentication and registration (Phase 1)."""
 import sqlite3
 import uuid
 
@@ -63,7 +63,7 @@ def test_register_duplicate_name(client):
 
 
 def test_register_uppercase_name_rejected(client):
-    # Regex nama hanya menerima huruf kecil; huruf besar ditolak validasi.
+    # The name regex accepts only lowercase letters; uppercase is rejected by validation.
     r = client.post(
         "/api/v1/register",
         headers={"X-Registration-Key": "test-registration-key"},
@@ -137,11 +137,11 @@ def test_fetch_updates_last_seen(client):
 
 
 def test_register_rate_limited(client, monkeypatch):
-    """Endpoint publik dibatasi per kombinasi kunci bucket.
+    """The public endpoint is limited per bucket key combination.
 
-    Kunci bucket produksi adalah hash token (endpoint ber-Authorization) atau
-    IP (endpoint publik). Untuk menguji limit register tanpa mengganggu tes
-    lain, kunci bucket dipaksa unik untuk tes ini.
+    The production bucket key is the token hash (Authorization endpoints) or
+    the IP (public endpoints). To test the register limit without disturbing
+    other tests, the bucket key is forced unique for this test.
     """
     from app.ratelimit import limiter
 
@@ -166,7 +166,7 @@ def test_register_rate_limited(client, monkeypatch):
 
 
 def test_rate_limit_key_ignores_client_header(client, monkeypatch):
-    """Header X-Ratelimit-Key dari client tidak boleh mengubah bucket."""
+    """The X-Ratelimit-Key header from the client must not change the bucket."""
     monkeypatch_agent = register_agent(client, "hermes-hdr")
     monkeypatch.setattr("app.config.settings.rate_limit_default", "2/minute")
     h = {"Authorization": f"Bearer {monkeypatch_agent['secret_key']}"}
@@ -178,11 +178,11 @@ def test_rate_limit_key_ignores_client_header(client, monkeypatch):
             headers={**h, "X-Ratelimit-Key": f"unik-{i}"},
         )
         codes.append(r.status_code)
-    # Semuanya satu bucket (kunci = hash token), jadi request ke-3 dapat 429
-    # walaupun header-nya berbeda — itulah poin perbaikan.
+    # All in one bucket (key = token hash), so the 3rd request gets 429
+    # even though the headers differ — that is the point of the fix.
     assert codes == [200, 200, 429]
 
-    # Bucket lain (token lain) tidak terpengaruh.
+    # Another bucket (another token) is unaffected.
     other = register_agent(client, "hermes-hdr2")
     r = client.get(
         "/api/v1/agents",

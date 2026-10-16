@@ -1,4 +1,4 @@
-"""POST /register, GET /agents (direktori), dan GET /health."""
+"""POST /register, GET /agents (directory), and GET /health."""
 import json
 import sqlite3
 
@@ -32,9 +32,9 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
     try:
         begin_immediate(conn)
 
-        # 1) Replay: nonce yang sama -> kembalikan secret yang sama.
-        #    Menyelamatkan kasus respons 201 hilang karena timeout: retry
-        #    tidak menghasilkan 409 dan nama agent tidak "terbakar".
+        # 1) Replay: same nonce -> return the same secret.
+        #    Saves the case where the 201 response is lost to a timeout: the
+        #    retry does not produce a 409 and the agent name is not "burned".
         if body.registration_nonce:
             replay = conn.execute(
                 "SELECT name, secret FROM registration_replays "
@@ -54,7 +54,7 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
                     "note": "Registrasi ini adalah replay dari permintaan sebelumnya.",
                 }
 
-        # 2) Nama sudah dipakai (dan bukan replay) -> konflik.
+        # 2) Name already taken (and not a replay) -> conflict.
         clash = conn.execute(
             "SELECT 1 FROM agents WHERE name = ? COLLATE NOCASE", (body.name,)
         ).fetchone()
@@ -91,9 +91,9 @@ def register(body: RegisterRequest, request: Request, x_registration_key: str | 
             "SELECT created_at FROM agents WHERE agent_id = ?", (agent_id,)
         ).fetchone()
     except (sqlite3.IntegrityError, sqlite3.OperationalError):
-        # Balapan: dua registrasi nama sama bersamaan. Yang kedua kena
-        # UNIQUE (atau lock tulis yang tetap tertahan) di sini, bukan di
-        # cek sebelumnya.
+        # Race: two registrations of the same name at the same time. The second
+        # one hits UNIQUE (or a write lock that remains held) here, not in the
+        # earlier check.
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise api_error(409, "CONFLICT", f"Nama '{body.name}' sudah terdaftar.")
@@ -122,7 +122,7 @@ def _agent_id_of(conn, name: str) -> str | None:
 @router.get("/agents")
 @limiter.limit(lambda: settings.rate_limit_default)
 def list_agents(request: Request, agent=Depends(require_scope("agents:read"))):
-    """Direktori agent: siapa saja yang terdaftar (untuk discovery sebelum chat)."""
+    """Agent directory: everyone registered (for discovery before chatting)."""
     conn = connect()
     try:
         rows = conn.execute(

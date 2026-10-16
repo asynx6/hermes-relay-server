@@ -1,4 +1,4 @@
-"""POST /upload-file, GET /files, dan GET /download-file/<file_id>."""
+"""POST /upload-file, GET /files, and GET /download-file/<file_id>."""
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -66,22 +66,22 @@ async def upload_file(
     caption: str | None = Form(default=None, max_length=500),
     agent=Depends(require_scope("files:write")),
 ):
-    """Unggah file + buat pesan bertipe file dalam satu alur tervalidasi.
+    """Upload a file + create a file-type message in one validated flow.
 
-    Validasi berlapis (kegagalan tidak pernah meninggalkan sisa file):
-      1. Form & pola ID                      -> 422
-      2. Content-Length lebih awal           -> 413
-      3. Ekstensi (daftar blokir)            -> 415
-      4. Streaming ke staging: ukuran nyata  -> 413
-      5. File kosong                         -> 400
-      6. Magic bytes: payload eksekusi       -> 415
-      7. (opsional) ekstensi vs isi          -> 415
-    Lalu, dalam transaksi singkat:
-      8. Duplikat client_msg_id (idempotent) -> 200 duplicate
-      9. Target: ID+nama cocok, aktif        -> 404 / 400 (self)
-     10. Keanggotaan grup                    -> 403
-     11. Kuota per agent (kalau diaktifkan)  -> 413
-     12. os.replace atomik + INSERT log+msg
+    Layered validation (a failure never leaves leftover files):
+      1. Form & ID patterns                  -> 422
+      2. Early Content-Length                -> 413
+      3. Extension (blocklist)               -> 415
+      4. Streaming to staging: real size     -> 413
+      5. Empty file                          -> 400
+      6. Magic bytes: executable payload     -> 415
+      7. (optional) extension vs content     -> 415
+    Then, in a short transaction:
+      8. Duplicate client_msg_id (idempotent) -> 200 duplicate
+      9. Target: ID+name match, active       -> 404 / 400 (self)
+     10. Group membership                    -> 403
+     11. Per-agent quota (if enabled)        -> 413
+     12. Atomic os.replace + INSERT log+msg
     """
     if target_type not in ("direct", "group"):
         raise api_error(400, "BAD_REQUEST", "target_type harus 'direct' atau 'group'.")
@@ -96,7 +96,7 @@ async def upload_file(
             raise api_error(413, "FILE_TOO_LARGE", "Melebihi batas ukuran unggahan.")
 
     original_name = file_service.sanitize_filename(file.filename or "file")
-    ext = file_service.safe_extension(original_name)  # 415 sebelum body dibaca
+    ext = file_service.safe_extension(original_name)  # 415 before the body is read
 
     staging = file_service.staging_path()
     try:
@@ -110,7 +110,7 @@ async def upload_file(
     try:
         begin_immediate(conn)
 
-        # (8) Idempotency: client_msg_id yang sama -> balas data pesan lama.
+        # (8) Idempotency: same client_msg_id -> reply with the old message data.
         existing = conn.execute(
             """SELECT fl.*, m.id AS message_id FROM file_logs fl
                JOIN messages m ON m.file_id = fl.file_id
@@ -137,7 +137,7 @@ async def upload_file(
                 },
             )
 
-        # (9)+(10) Otorisasi target.
+        # (9)+(10) Target authorization.
         if target_type == "direct":
             if target_name.strip().lower() == agent["name"].lower():
                 raise api_error(400, "BAD_REQUEST", "Tidak bisa mengirim file ke diri sendiri.")
@@ -148,7 +148,7 @@ async def upload_file(
             message_service.ensure_group_member(conn, group["id"], agent["id"])
             recipient_id, group_id = None, group["id"]
 
-        # (11) Kuota penyimpanan per agent (0 = nonaktif).
+        # (11) Per-agent storage quota (0 = disabled).
         if settings.max_storage_mb_per_agent > 0:
             used = conn.execute(
                 "SELECT COALESCE(SUM(size_bytes), 0) AS used FROM file_logs "
@@ -163,9 +163,9 @@ async def upload_file(
                     f"Kuota penyimpanan {settings.max_storage_mb_per_agent} MB per agent terlampaui.",
                 )
 
-        # (12) Commit atomik: dedupe (hardlink) atau rename, lalu dua INSERT.
-        #      Kalau isi yang sama sudah ada dan boleh dilihat agent ini,
-        #      file baru cukup menunjuk isi yang sama — nol byte disk tambahan.
+        # (12) Atomic commit: dedupe (hardlink) or rename, then two INSERTs.
+        #      If identical content already exists and is visible to this agent,
+        #      the new file just points to the same content — zero extra disk bytes.
         dedupe_source = file_service.dedupe_source(
             conn, agent["id"], meta["sha256"], meta["size"]
         )
@@ -173,7 +173,7 @@ async def upload_file(
         if deduplicated:
             dest = file_service.link_blob(dedupe_source["stored_name"], ext, conn)
             file_service.discard(staging)
-            staging = None  # sudah dibuang; jangan dua kali
+            staging = None  # already discarded; do not do it twice
         else:
             dest = file_service.finalize(staging, ext, conn)
         final_path = dest
@@ -218,8 +218,8 @@ async def upload_file(
     finally:
         conn.close()
         if not committed:
-            # Kegagalan sebelum commit: staging harus bersih. Kalau rename
-            # sudah terjadi tapi commit gagal, buang file finalnya juga.
+            # Failure before commit: staging must be clean. If the rename
+            # already happened but the commit failed, discard the final file too.
             file_service.discard(staging)
             if final_path is not None:
                 Path(final_path).unlink(missing_ok=True)
@@ -252,9 +252,9 @@ def list_files(
     offset: int = Query(default=0, ge=0),
     agent=Depends(require_scope("files:read")),
 ):
-    """Daftar file yang boleh diakses agent ini: yang diunggah sendiri,
-    yang diterima langsung, atau file di grup tempat agent ini anggota.
-    Setiap baris bisa langsung diunduh lewat /download-file/<file_id>."""
+    """List of files this agent may access: ones it uploaded itself,
+    ones received directly, or files in groups this agent is a member of.
+    Each row can be downloaded directly via /download-file/<file_id>."""
     conn = connect()
     try:
         total = conn.execute(

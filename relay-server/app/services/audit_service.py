@@ -1,17 +1,17 @@
-"""Audit log append-only untuk aksi administratif dan keamanan.
+"""Append-only audit log for administrative and security actions.
 
-Dashboard adalah permukaan admin: pemegang sesi bisa mengirim pesan sebagai
-agent mana pun, mengunduh semua file, dan mengubah keanggotaan grup. Tanpa
-jejak, penyalahgunaan tidak bisa ditelusuri. Setiap aksi penting dicatat di
-sini: aktor, aksi, target, detail, IP, dan hasilnya.
+The dashboard is an admin surface: the session holder can send messages as
+any agent, download every file, and change group membership. Without a trail,
+abuse cannot be traced. Every important action is recorded here: actor,
+action, target, detail, IP, and result.
 
-Log bersifat append-only — tidak ada UPDATE/DELETE kecuali pemangkasan
-retention (`prune`) yang membuang baris lebih tua dari N hari.
+The log is append-only — there is no UPDATE/DELETE except the retention
+pruning (`prune`) that discards rows older than N days.
 """
 import json
 import sqlite3
 
-# Aksi yang dicatat. Dikumpulkan di sini agar konsisten dan mudah dicari.
+# Recorded actions. Collected here for consistency and easy lookup.
 ACTION_SEND_AS_AGENT = "send_as_agent"
 ACTION_DELETE_FILE = "delete_file"
 ACTION_DOWNLOAD_FILE = "download_file"
@@ -35,7 +35,7 @@ def record(
     ip: str | None = None,
     result: str = "ok",
 ) -> None:
-    """Catat satu baris audit. TIDAK commit — ikut transaksi pemanggil."""
+    """Record one audit row. Does NOT commit — joins the caller's transaction."""
     conn.execute(
         """INSERT INTO audit_log (actor, actor_type, action, target, detail, ip, result)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -52,10 +52,10 @@ def record(
 
 
 def safe_record(conn: sqlite3.Connection, **kwargs) -> None:
-    """Seperti record(), tapi kegagalan audit tidak boleh menggagalkan aksi utama.
+    """Like record(), but an audit failure must not fail the main action.
 
-    Dipakai untuk aksi yang sudah terlanjur terjadi (mis. login gagal) —
-    kehilangan satu baris log lebih baik daripada membalas 500 ke pengguna.
+    Used for actions that have already happened (e.g. a failed login) —
+    losing one log row is better than returning a 500 to the user.
     """
     try:
         record(conn, **kwargs)
@@ -75,7 +75,7 @@ def recent(
     action: str | None = None,
     actor_type: str | None = None,
 ) -> tuple[list[dict], int]:
-    """Ambil baris audit terbaru + totalnya, dengan filter opsional."""
+    """Fetch the latest audit rows + their total, with optional filters."""
     where, params = [], []
     if action:
         where.append("action = ?")
@@ -107,7 +107,7 @@ def recent(
 
 
 def prune(conn: sqlite3.Connection, retention_days: int) -> int:
-    """Buang baris audit lebih tua dari retention_days. Kembalikan jumlahnya."""
+    """Discard audit rows older than retention_days. Return the count."""
     cur = conn.execute(
         "DELETE FROM audit_log WHERE at < "
         "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",

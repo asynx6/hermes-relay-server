@@ -1,17 +1,18 @@
-"""POST /send-message, GET /fetch-messages, ack, receipts, tasks, dan SSE.
+"""POST /send-message, GET /fetch-messages, ack, receipts, tasks, and SSE.
 
-Dua jalur pengambilan pesan tersedia:
+Two message-retrieval paths are available:
 
-- **Polling** (`GET /fetch-messages`) — client bertanya berkala. Sederhana dan
-  selalu bekerja.
-- **Long polling** (`GET /fetch-messages?wait=25`) — request ditahan sampai
-  ada pesan baru atau timeout, sehingga latensi turun ke hampir instan tanpa
-  menambah jumlah request.
-- **SSE** (`GET /events`) — satu koneksi terbuka; server mendorong pesan
-  begitu tiba. Paling hemat, tapi butuh proxy yang tidak mem-buffer respons.
+- **Polling** (`GET /fetch-messages`) — the client asks periodically. Simple
+  and always works.
+- **Long polling** (`GET /fetch-messages?wait=25`) — the request is held until
+  a new message arrives or it times out, so latency drops to nearly instant
+  without increasing the number of requests.
+- **SSE** (`GET /events`) — one open connection; the server pushes messages
+  as soon as they arrive. Most efficient, but needs a proxy that does not
+  buffer responses.
 
-Keduanya opsional (`LONG_POLL_ENABLED`, `SSE_ENABLED`); polling biasa tetap
-jadi jalur fallback.
+Both are optional (`LONG_POLL_ENABLED`, `SSE_ENABLED`); regular polling
+remains the fallback path.
 """
 import asyncio
 import json
@@ -32,7 +33,7 @@ router = APIRouter()
 
 
 def _fetch_only(agent_row_id: int, since_id: int, limit: int):
-    """Ambil pesan saja (read-only) — dipakai di dalam loop tunggu."""
+    """Fetch messages only (read-only) — used inside the wait loop."""
     conn = connect()
     try:
         return message_service.fetch_messages(conn, agent_row_id, since_id, limit)
@@ -41,11 +42,11 @@ def _fetch_only(agent_row_id: int, since_id: int, limit: int):
 
 
 def _touch_last_seen(agent_row_id: int) -> None:
-    """Perbarui `last_seen_at` SEKALI per request.
+    """Update `last_seen_at` ONCE per request.
 
-    Sengaja dipisah dari `_fetch_only`: long polling/SSE memanggil fetch
-    berkali-kali selama menunggu, dan menulis setiap iterasi akan menjadi
-    amplifikasi tulis besar kalau banyak agent menunggu bersamaan.
+    Deliberately separated from `_fetch_only`: long polling/SSE calls fetch
+    many times while waiting, and writing on every iteration would become a
+    large write amplification if many agents wait at the same time.
     """
     conn = connect()
     try:
@@ -60,8 +61,8 @@ def _touch_last_seen(agent_row_id: int) -> None:
 
 
 def _current_max_id() -> int:
-    """ID pesan tertinggi saat ini — titik mulai SSE agar hanya pesan BARU
-    yang didorong ke koneksi yang baru dibuka."""
+    """Current highest message ID — the SSE start point so only NEW messages
+    are pushed to a newly opened connection."""
     conn = connect()
     try:
         row = conn.execute("SELECT COALESCE(MAX(id), 0) AS n FROM messages").fetchone()
@@ -77,7 +78,7 @@ def send_message(
     request: Request,
     agent=Depends(require_scope("messages:write")),
 ):
-    # Satu koneksi untuk cek duplikat + insert; transaksi membuat retry aman.
+    # One connection for duplicate check + insert; the transaction makes retry safe.
     conn = connect()
     try:
         begin_immediate(conn)
@@ -86,7 +87,7 @@ def send_message(
         )
         if duplicate:
             conn.commit()
-            # client_msg_id sudah pernah dikirim: balas 200 dengan data pesan lama.
+            # client_msg_id was already sent: reply 200 with the old message data.
             return JSONResponse(
                 status_code=200,
                 content={
@@ -132,8 +133,8 @@ def send_message(
             task_id=body.task_id,
             task_status=body.task_status,
         )
-        # Mention @nama: dicatat agar penerima bisa menyaring pesan yang
-        # benar-benar menyebut dirinya. Di grup hanya anggota yang dicatat.
+        # @name mentions: recorded so the recipient can filter messages that
+        # actually mention them. In groups only members are recorded.
         mentions = message_service.store_mentions(
             conn,
             row["id"],
@@ -178,13 +179,13 @@ async def fetch_messages(
     ),
     agent=Depends(require_scope("messages:read")),
 ):
-    """Ambil pesan baru untuk agent ini.
+    """Fetch new messages for this agent.
 
-    `wait=0` (default) mengembalikan segera — perilaku polling biasa. `wait>0`
-    menahan request di server sampai ada pesan baru atau timeout, jadi client
-    tahu soal pesan baru hampir seketika tanpa harus sering bertanya. Nilai
-    dibatasi `LONG_POLL_MAX_SECONDS` (default 25) dan bisa dimatikan dengan
-    `LONG_POLL_ENABLED=false`.
+    `wait=0` (default) returns immediately — regular polling behavior. `wait>0`
+    holds the request on the server until a new message arrives or it times
+    out, so the client learns about new messages almost instantly without
+    having to ask often. The value is capped by `LONG_POLL_MAX_SECONDS`
+    (default 25) and can be disabled with `LONG_POLL_ENABLED=false`.
     """
     agent_row_id = agent["id"]
     effective_wait = min(wait, settings.long_poll_max_seconds) if settings.long_poll_enabled else 0
@@ -211,8 +212,8 @@ async def fetch_messages(
                 "next_since_id": next_since_id,
                 "has_more": has_more,
                 "waited": effective_wait,
-                # Berubah kalau DB di-reset; client harus menyadari cursor
-                # lama tidak valid lagi kalau nilai ini berbeda.
+                # Changes if the DB is reset; the client must realize the old
+                # cursor is no longer valid if this value differs.
                 "server_epoch": settings.server_epoch,
             },
         },
@@ -226,16 +227,16 @@ async def events(
     since_id: int | None = Query(default=None, ge=0),
     agent=Depends(require_scope("messages:read")),
 ):
-    """SSE: satu koneksi, server mendorong pesan baru begitu tiba.
+    """SSE: one connection, the server pushes new messages as they arrive.
 
-    Kejadian yang dikirim:
-      `event: messages` — payload sama dengan /fetch-messages.
-      `event: epoch`    — dikirim sekali di awal (identitas instance DB).
-      komentar `: ping` — heartbeat berkala agar koneksi tidak diputus proxy.
+    Events sent:
+      `event: messages` — payload identical to /fetch-messages.
+      `event: epoch`    — sent once at the start (DB instance identity).
+      `: ping` comment  — periodic heartbeat so the proxy does not drop the connection.
 
-    Kalau `since_id` tidak diberikan, hanya pesan yang datang SETELAH koneksi
-    dibuka yang didorong. Butuh `SSE_ENABLED=true` dan proxy tanpa buffering
-    respons.
+    If `since_id` is not given, only messages that arrive AFTER the connection
+    is opened are pushed. Requires `SSE_ENABLED=true` and a proxy without
+    response buffering.
     """
     if not settings.sse_enabled:
         raise api_error(404, "NOT_FOUND", "SSE tidak diaktifkan di server ini.")
@@ -244,7 +245,7 @@ async def events(
     epoch = settings.server_epoch
     start = since_id if since_id is not None else await run_in_threadpool(_current_max_id)
     heartbeat = settings.sse_heartbeat_seconds
-    await run_in_threadpool(_touch_last_seen, agent_row_id)  # tandai hidup saat connect
+    await run_in_threadpool(_touch_last_seen, agent_row_id)  # mark alive on connect
 
     async def stream():
         cursor = start
@@ -258,7 +259,7 @@ async def events(
                     _fetch_only, agent_row_id, cursor, 50
                 )
             except Exception:
-                # Jangan matikan stream karena satu query gagal.
+                # Do not kill the stream because one query failed.
                 await asyncio.sleep(1.0)
                 continue
             if messages:
@@ -271,7 +272,7 @@ async def events(
                     }
                 )
                 yield f"event: messages\ndata: {payload}\n\n"
-                # Sekali per batch yang benar-benar dikirim, bukan per iterasi.
+                # Once per batch that is actually sent, not per iteration.
                 await run_in_threadpool(_touch_last_seen, agent_row_id)
                 last_beat = time.monotonic()
                 continue
@@ -286,7 +287,7 @@ async def events(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Nginx: matikan buffering respons
+            "X-Accel-Buffering": "no",  # Nginx: disable response buffering
         },
     )
 
@@ -298,10 +299,10 @@ def ack_messages(
     request: Request,
     agent=Depends(require_scope("messages:write")),
 ):
-    """Tandai pesan sebagai diterima/dibaca oleh agent pemanggil.
+    """Mark messages as received/read by the calling agent.
 
-    Hanya pesan yang benar-benar ditujukan ke agent ini (langsung atau lewat
-    grupnya) yang boleh di-ack; pesan milik agent lain diabaikan.
+    Only messages actually addressed to this agent (directly or via its
+    group) may be acked; messages belonging to other agents are ignored.
     """
     conn = connect()
     try:
@@ -341,7 +342,7 @@ def receipts(
     message_ids: str = Query(..., description="Daftar message_id dipisah koma"),
     agent=Depends(require_scope("messages:read")),
 ):
-    """Status penerimaan pesan yang dikirim agent ini (butuh daftar ID)."""
+    """Delivery status of messages sent by this agent (requires a list of IDs)."""
     try:
         ids = [int(x) for x in message_ids.split(",") if x.strip()][:100]
     except ValueError:
@@ -384,7 +385,7 @@ def receipts(
 def get_task(
     request: Request, task_id: str, agent=Depends(require_scope("messages:read"))
 ):
-    """Riwayat satu tugas (task + result) yang terlihat oleh agent ini."""
+    """History of a single task (task + result) visible to this agent."""
     conn = connect()
     try:
         thread = message_service.task_thread(conn, task_id, agent["id"])

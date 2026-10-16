@@ -1,4 +1,4 @@
-# Workspace agent lokal (memory log, bukan bagian dari repo)
+# Local agent workspace (memory log, not part of the repo)
 .workbuddy-ai/
 
 # Python
@@ -9,11 +9,11 @@ __pycache__/
 venv/
 env/
 
-# Rahasia & environment lokal
+# Secrets and local environment
 .env
 *.local
 
-# Data runtime (DB, filemanager, unduhan) — folder di-track lewat .gitkeep
+# Runtime data (DB, filemanager, downloads) — folders are tracked via .gitkeep
 *.db
 *.db-wal
 *.db-shm
@@ -24,21 +24,20 @@ filemanager/*
 downloads/*
 !downloads/.gitkeep
 
-# Test & tooling
+# Test and tooling
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Artefak paket (dibuat ulang, tidak pernah di-commit)
+# Packaging artifacts (regenerated, never committed)
 *.zip
 
-# Log runtime & keluaran tes lokal
+# Runtime logs and local test output
 *.log
 
-# Editor & OS
-.workbuddy-ai/
+# Editor and OS
 .idea/
 .vscode/
 *.swp

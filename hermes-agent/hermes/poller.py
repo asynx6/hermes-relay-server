@@ -1,22 +1,22 @@
-"""Loop pengambilan pesan: polling adaptif, long polling, atau SSE.
+"""Message-fetching loop: adaptive polling, long polling, or SSE.
 
-Mode (pilih satu):
-- **polling** (default) — interval adaptif: ada pesan -> POLL_MIN, kosong ->
-  naik x1.5 sampai POLL_MAX, server mati -> backoff x2.
-- **long polling** (`wait_seconds>0`) — server menahan request sampai ada
-  pesan atau timeout, jadi latensi hampir instan tanpa menambah jumlah
-  request.
-- **SSE** (`use_sse=True`) — satu koneksi terbuka; server mendorong pesan.
-  Paling hemat; menyambung ulang otomatis dengan backoff.
+Modes (pick one):
+- **polling** (default) — adaptive interval: message present -> POLL_MIN, empty ->
+  increase x1.5 up to POLL_MAX, server down -> backoff x2.
+- **long polling** (`wait_seconds>0`) — the server holds the request until a
+  message arrives or a timeout, so latency is nearly instant without increasing
+  the number of requests.
+- **SSE** (`use_sse=True`) — one open connection; the server pushes messages.
+  Most efficient; reconnects automatically with backoff.
 
-Ketahanan (berlaku di semua mode):
-- Handler `on_message` dijalankan per pesan dalam try/except; satu pesan
-  yang bikin handler error tidak boleh mematikan loop.
-- Kegagalan sementara saat flush outbox menghentikan siklus flush (bukan
-  retry tanpa henti) dan pesan tetap `pending` untuk siklus berikutnya.
-- Unduhan file yang gagal karena jaringan ditandai `pending` dan diulang
-  otomatis setiap siklus.
-- Setelah pesan diproses, agent mengirim ack ke server (endpoint /ack).
+Resilience (applies to all modes):
+- The `on_message` handler runs per message inside try/except; one message
+  that makes the handler error must not kill the loop.
+- A transient failure while flushing the outbox stops the flush cycle (not
+  endless retries) and the message stays `pending` for the next cycle.
+- File downloads that fail due to the network are marked `pending` and retried
+  automatically every cycle.
+- After a message is processed, the agent sends an ack to the server (/ack endpoint).
 """
 import threading
 import uuid
@@ -45,17 +45,17 @@ class Poller:
     # ---- outbox ----
 
     def flush_outbox(self) -> None:
-        """Kirim ulang pesan pending.
+        """Resend pending messages.
 
-        Server mati -> berhenti dari siklus ini (break), JANGAN retry tiap
-        pesan sampai puluhan detik lalu menandainya gagal. Error permanen
-        (mis. target tidak ada) tetap ditandai failed agar tidak mengulang
-        selamanya.
+        Server down -> stop this cycle (break), do NOT retry each message
+        for tens of seconds and then mark them failed. Permanent errors
+        (e.g. target missing) are still marked failed so they do not repeat
+        forever.
         """
         for row in self.memory.pending_outbox():
             peer_id = row["peer_id"]
             if peer_id is None:
-                # Baris lama (sebelum addressing ID+nama): resolve ulang.
+                # Old row (before ID+name addressing): resolve again.
                 peer_id = self._resolve_peer(row["scope"], row["peer"])
                 if peer_id is None:
                     self.memory.mark_failed(row["id"])
@@ -73,8 +73,8 @@ class Poller:
             except AuthRejected:
                 raise
             except RelayUnavailable:
-                # Server tidak bisa dijangkau: sisakan sisanya untuk siklus
-                # berikutnya, jangan bakar retry_count.
+                # Server unreachable: leave the rest for the next
+                # cycle, do not burn retry_count.
                 break
             except RETRYABLE:
                 break
@@ -101,11 +101,11 @@ class Poller:
             return None
         return match.get("group_id") or match.get("agent_id")
 
-    # ---- pesan masuk ----
+    # ---- incoming messages ----
 
     def _handle_incoming(self, messages: list[dict]) -> list[int]:
-        """Proses pesan baru; satu handler yang error tidak menghentikan
-        yang lain. Kembalikan daftar id pesan yang sudah diproses (untuk ack)."""
+        """Process new messages; one handler that errors does not stop the
+        others. Return the list of processed message ids (for ack)."""
         processed: list[int] = []
         for msg in messages:
             try:
@@ -122,7 +122,7 @@ class Poller:
                 self.on_message(msg)
                 processed.append(msg["id"])
             except Exception as exc:
-                # Loop harus hidup; catat dan lanjut ke pesan berikutnya.
+                # The loop must stay alive; log and continue to the next message.
                 print(f"Handler error untuk pesan #{msg.get('id')}: {exc!r}", flush=True)
         return processed
 
@@ -132,14 +132,14 @@ class Poller:
         try:
             self.api.ack(message_ids)
         except Exception:
-            pass  # ack adalah optimasi status; gagal bukan masalah fatal
+            pass  # ack is a status optimization; a failure is not fatal
 
-    # ---- loop utama ----
+    # ---- main loop ----
 
     def poll_once(self) -> tuple[bool, bool]:
-        """Satu siklus kerja: flush outbox, retry unduhan, fetch, proses.
+        """One work cycle: flush outbox, retry downloads, fetch, process.
 
-        Mengembalikan (server_merespons, masih_ada_pesan).
+        Returns (server_responds, more_messages_pending).
         """
         try:
             self.flush_outbox()
@@ -148,7 +148,7 @@ class Poller:
             self.auth_rejected = True
             return False, False
         except Exception as exc:
-            # Jangan mati karena satu siklus flush yang error.
+            # Do not die because a single flush cycle errored.
             print(f"flush_outbox error: {exc!r}", flush=True)
 
         try:
@@ -167,12 +167,12 @@ class Poller:
         except RelayUnavailable:
             return False, False
         except Exception as exc:
-            # Termasuk JSONDecodeError dari respons non-JSON (mis. halaman
-            # error proxy). Loop tetap hidup.
+            # Includes JSONDecodeError from a non-JSON response (e.g. a proxy
+            # error page). The loop stays alive.
             print(f"fetch_messages error: {exc!r}", flush=True)
             return False, False
 
-        # Cursor tidak lagi valid kalau DB server di-reset.
+        # The cursor is no longer valid if the server DB was reset.
         epoch = data.get("server_epoch")
         if epoch and not self.memory.server_epoch_matches(epoch):
             print(
@@ -207,8 +207,8 @@ class Poller:
                 self.stop_event.wait(interval)
                 continue
             if self.wait_seconds > 0:
-                # Server sudah menahan request sampai ada pesan/timeout; tidak
-                # perlu jeda panjang. Jeda kecil hanya saat masih ada sisa.
+                # The server already held the request until a message/timeout; no
+                # long pause is needed. A small pause only when there is leftover.
                 if not has_more:
                     self.stop_event.wait(0.2)
                 continue
@@ -216,10 +216,10 @@ class Poller:
             if not has_more:
                 self.stop_event.wait(interval)
 
-    # ---- mode SSE ----
+    # ---- SSE mode ----
 
     def _housekeeping(self) -> bool:
-        """Flush outbox + ulangi unduhan tertunda. False = token ditolak."""
+        """Flush outbox + retry pending downloads. False = token rejected."""
         try:
             self.flush_outbox()
         except AuthRejected as exc:
@@ -260,7 +260,7 @@ class Poller:
         self._ack(self._handle_incoming(new_messages))
 
     def run_sse(self) -> None:
-        """Mode SSE: koneksi tunggal, sambung ulang otomatis dengan backoff."""
+        """SSE mode: a single connection, reconnect automatically with backoff."""
         backoff = self.poll_min
         while not self.stop_event.is_set() and not self.auth_rejected:
             if not self._housekeeping():

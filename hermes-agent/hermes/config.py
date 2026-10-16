@@ -1,7 +1,8 @@
-"""Konfigurasi client dari config.json.
+"""Client configuration from config.json.
 
-Setelah registrasi berhasil, registration_key dihapus dari file dan
-secret_key terisi. File ini memuat secret, jadi permission diatur ke 0600.
+After a successful registration, registration_key is removed from the file
+and secret_key is filled in. This file holds a secret, so its permissions
+are set to 0600.
 """
 import json
 import os
@@ -38,7 +39,7 @@ class ClientConfig:
         self.poll_max_seconds: float = float(merged["poll_max_seconds"])
         self.download_dir: str = merged["download_dir"]
         self.max_upload_mb: int = int(merged["max_upload_mb"])
-        # Transport: 0 = polling biasa; >0 = long polling; use_sse = SSE.
+        # Transport: 0 = plain polling; >0 = long polling; use_sse = SSE.
         self.poll_wait_seconds: int = int(merged.get("poll_wait_seconds", 0) or 0)
         self.use_sse: bool = bool(merged.get("use_sse", False))
         self.registration_nonce: str = merged.get("registration_nonce", "")
@@ -48,11 +49,11 @@ class ClientConfig:
         return bool(self.secret_key)
 
     def save_registration(self, secret_key: str, registration_nonce: str | None = None) -> None:
-        """Simpan secret dan buang registration_key (dipakai sekali).
+        """Save the secret and drop registration_key (used only once).
 
-        Nonce registrasi dipertahankan sesaat: kalau secret/agent_id hilang
-        lagi (file terhapus), registrasi ulang dengan nonce yang sama akan
-        memutar secret yang sama dari server.
+        The registration nonce is kept briefly: if the secret/agent_id is
+        lost again (file deleted), re-registering with the same nonce will
+        replay the same secret from the server.
         """
         if registration_nonce:
             self.registration_nonce = registration_nonce
@@ -96,6 +97,6 @@ class ClientConfig:
         try:
             os.chmod(self.path, 0o600)
         except OSError:
-            # Windows: chmod hanya mendukung flag read-only. Secret tetap
-            # tersimpan, batas proteksinya maksimal sebisanya.
+            # Windows: chmod only supports the read-only flag. The secret is
+            # still stored; the protection limit is as much as possible.
             pass

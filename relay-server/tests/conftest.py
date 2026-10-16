@@ -1,7 +1,7 @@
-"""Fixture bersama: env diatur SEBELUM app diimpor.
+"""Shared fixtures: env is set BEFORE the app is imported.
 
-Setiap test dapat DB bersih lewat fixture `client`. Test integrasi
-memakai server uvicorn sungguhan via fixture `live_server`.
+Each test gets a clean DB through the `client` fixture. Integration tests
+use a real uvicorn server via the `live_server` fixture.
 """
 import os
 import shutil
@@ -18,19 +18,19 @@ TESTS_DIR = Path(__file__).resolve().parent
 SERVER_ROOT = TESTS_DIR.parent
 REPO_ROOT = SERVER_ROOT.parent
 
-# Direktori kerja khusus test (DB + filemanager terpisah dari data dev).
+# Test-specific working directory (DB + filemanager separate from dev data).
 TMP_ROOT = Path(tempfile.mkdtemp(prefix="relay-test-"))
 
 os.environ["REGISTRATION_KEY"] = "test-registration-key"
 os.environ["DB_PATH"] = str(TMP_ROOT / "relay.db")
 os.environ["FILEMANAGER_DIR"] = str(TMP_ROOT / "filemanager")
-# Limit dilonggarkan untuk rangkaian test; tes khusus rate limit
-# menurunkan nilainya sendiri dengan bucket kunci unik.
+# Limits are relaxed for the test suite; the dedicated rate limit tests
+# lower them themselves with a unique bucket key.
 os.environ["RATE_LIMIT_REGISTER"] = "10000/minute"
 os.environ["RATE_LIMIT_DEFAULT"] = "100000/minute"
 os.environ["RATE_LIMIT_LOGIN"] = "10000/minute"
-# Password dashboard eksplisit untuk test (tanpa env ini, auth.py membuat
-# password acak dan mencetaknya sekali ke stdout).
+# Explicit dashboard password for tests (without this env, auth.py generates
+# a random password and prints it once to stdout).
 os.environ["DASHBOARD_PASSWORD"] = "123456"
 os.environ.setdefault("RETENTION_DAYS", "30")
 
@@ -43,14 +43,14 @@ from app.main import create_app  # noqa: E402
 
 
 def reset_db() -> None:
-    """Hapus file DB dan buat ulang skema. Dipanggil per test."""
+    """Delete the DB file and recreate the schema. Called per test."""
     for suffix in ("", "-wal", "-shm"):
         Path(str(settings.db_path) + suffix).unlink(missing_ok=True)
     init_db()
     if settings.filemanager_dir.exists():
         shutil.rmtree(settings.filemanager_dir)
     settings.filemanager_dir.mkdir(parents=True, exist_ok=True)
-    # Sesi dashboard: password kembali ke default dan secret JWT dibuat ulang.
+    # Dashboard session: password resets to default and the JWT secret is regenerated.
     for name in (
         "dashboard_auth.json",
         "dashboard_jwt_secret",
@@ -96,13 +96,13 @@ def register_agent(client, name: str, description: str | None = None,
 
 
 def auth(secret: str) -> dict:
-    # Kunci bucket rate limit adalah hash token, bukan header khusus test,
-    # sehingga setiap agent punya bucket sendiri secara alami.
+    # The rate limit bucket key is the token hash, not a test-specific header,
+    # so each agent naturally gets its own bucket.
     return {"Authorization": f"Bearer {secret}"}
 
 
 def create_group(client, secret: str, name: str, description: str | None = None) -> dict:
-    """Buat grup, kembalikan data (termasuk group_id publik 'gr_...')."""
+    """Create a group, return the data (including the public group_id 'gr_...')."""
     r = client.post(
         "/api/v1/groups",
         headers=auth(secret),
@@ -128,7 +128,7 @@ def send(
     content: str,
     target_id: str | None = None,
 ) -> dict:
-    """Kirim pesan. Untuk direct, target_id di-resolve otomatis dari nama."""
+    """Send a message. For direct, target_id is resolved automatically from the name."""
     if target_id is None:
         assert target_type == "direct", "target_id wajib untuk grup"
         r = client.get("/api/v1/agents", headers=auth(secret))
@@ -166,7 +166,7 @@ def fetch(client, secret: str, since_id: int = 0, limit: int = 50) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Server live untuk test integrasi client nyata
+# Live server for real-client integration tests
 # ---------------------------------------------------------------------------
 
 def free_port() -> int:
@@ -178,11 +178,11 @@ def free_port() -> int:
 
 
 class LiveServer:
-    """Uvicorn berjalan di thread terpisah, persis seperti proses produksi.
+    """Uvicorn running in a separate thread, exactly like the production process.
 
-    Bisa di-restart (stop lalu start) untuk menguji pemulihan agent.
-    settings.db_path / filemanager_dir diarahkan ke direktori test selama
-    server hidup, lalu dipulihkan saat stop.
+    Can be restarted (stop then start) to test agent recovery.
+    settings.db_path / filemanager_dir are pointed at the test directory while
+    the server is alive, then restored on stop.
     """
 
     def __init__(self):
@@ -213,7 +213,7 @@ class LiveServer:
             return
         import uvicorn
 
-        # Restart TIDAK menghapus DB: pesan dan registrasi harus utuh.
+        # Restart does NOT delete the DB: messages and registrations must stay intact.
         settings.db_path = self.db_path
         settings.filemanager_dir = self.filemanager
         self.server = uvicorn.Server(

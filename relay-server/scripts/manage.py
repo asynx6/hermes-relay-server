@@ -1,6 +1,6 @@
-"""CLI admin relay server.
+"""Relay server admin CLI.
 
-Pakai:
+Usage:
     python scripts/manage.py list-agents
     python scripts/manage.py reset-token <name>
     python scripts/manage.py revoke <name>

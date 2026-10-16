@@ -1,11 +1,11 @@
-"""Lock satu-instans: cegah `poll` dan cron `fetch-once` berjalan bersamaan
-dengan cursor yang sama (pesan bisa terproses dua kali atau balapan).
+"""Single-instance lock: prevents `poll` and cron `fetch-once` from running
+concurrently with the same cursor (messages could be processed twice or race).
 
-Cara pakai:
+Usage:
     with instance_lock(lock_path):
         poller.run()
 
-Kalau lock sudah dipegang proses lain, keluar dengan SystemExit.
+If the lock is already held by another process, exit with SystemExit.
 """
 import errno
 import os

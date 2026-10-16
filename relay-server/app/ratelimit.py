@@ -1,16 +1,16 @@
-"""Rate limiter tunggal untuk aplikasi.
+"""Single rate limiter for the application.
 
-Kunci bucket:
-- Endpoint ber-token (Authorization) -> hash token, BUKAN IP. Di belakang
-  reverse proxy semua agent tampak sebagai satu IP proxy, jadi bucket per-IP
-  akan dibagi bersama dan mudah habis; per-token juga menahan satu agent
-  yang bermasalah tanpa menghukum agent lain.
-- Endpoint publik (/register, /login dashboard) -> IP, karena tidak ada
-  token. Karena di belakang proxy IP yang terlihat adalah IP proxy, batas
-  untuk endpoint publik harus longgar dan password wajib kuat.
+Bucket keys:
+- Token-bearing endpoints (Authorization) -> hash of the token, NOT the IP.
+  Behind a reverse proxy all agents appear as one proxy IP, so a per-IP
+  bucket would be shared and easily exhausted; per-token also throttles a
+  single misbehaving agent without punishing the others.
+- Public endpoints (/register, dashboard /login) -> IP, because there is no
+  token. Since behind a proxy the visible IP is the proxy IP, the limits
+  for public endpoints must be loose and passwords must be strong.
 
-Bucket disimpan di memori proses. Untuk beberapa worker uvicorn, pindah ke
-storage Redis (lihat catatan di README).
+Buckets are kept in process memory. For multiple uvicorn workers, switch to
+Redis storage (see the note in the README).
 """
 import hashlib
 

@@ -1,4 +1,4 @@
-"""Test messaging direct dan grup (Fase 2)."""
+"""Tests for direct and group messaging (Phase 2)."""
 import sqlite3
 import uuid
 
@@ -100,7 +100,7 @@ def test_idempotent_retry_same_client_msg_id(client):
     assert body2["duplicate"] is True
     assert body2["message_id"] == body1["message_id"]
 
-    # Hanya satu baris di database.
+    # Only one row in the database.
     from conftest import settings
 
     conn = sqlite3.connect(settings.db_path)
@@ -176,9 +176,9 @@ def test_group_message_reaches_all_members_not_sender(client):
         assert msgs[0]["group_id"] == group["group_id"]
         assert msgs[0]["content"] == "Update: dataset siap"
 
-    # Non-member tidak melihat pesan grup.
+    # A non-member does not see group messages.
     assert fetch(client, d["secret_key"])["messages"] == []
-    # Pengirim tidak menerima pesannya sendiri.
+    # The sender does not receive their own message.
     assert fetch(client, a["secret_key"])["messages"] == []
 
 
@@ -202,13 +202,13 @@ def test_non_member_cannot_send_to_group(client):
 
 
 def test_send_with_mismatched_id_and_name(client):
-    """ID dan nama harus cocok — kalau tidak, 404 (bukan kirim ke siapanya."""
+    """ID and name must match — otherwise 404 (not sent to just anyone)."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     c = register_agent(client, "hermes-c")
     h = {"Authorization": f"Bearer {a['secret_key']}"}
 
-    # ID agent B tapi nama agent C.
+    # Agent B's ID but agent C's name.
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={
@@ -222,7 +222,7 @@ def test_send_with_mismatched_id_and_name(client):
     assert r.status_code == 404
     assert r.json()["code"] == "NOT_FOUND"
 
-    # ID valid, nama asing.
+    # Valid ID, unknown name.
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={
@@ -235,7 +235,7 @@ def test_send_with_mismatched_id_and_name(client):
     )
     assert r.status_code == 404
 
-    # ID dengan format salah.
+    # ID with the wrong format.
     r = client.post(
         "/api/v1/send-message", headers=h,
         json={
@@ -263,7 +263,7 @@ def test_new_member_only_sees_messages_after_joining(client):
         client, a["secret_key"], "group", "research-team", "pesan-1",
         target_id=group["group_id"],
     )
-    # C join setelah pesan-1 terkirim.
+    # C joins after pesan-1 was sent.
     client.post(
         "/api/v1/groups/research-team/join",
         headers={"Authorization": f"Bearer {c['secret_key']}"},
@@ -303,7 +303,7 @@ def test_duplicate_group_name(client):
         json={"name": "research-team"},
     )
     assert r.status_code == 201
-    # Nama valid hanya huruf kecil; duplikat persis harus 409.
+    # Valid names are lowercase only; an exact duplicate must be 409.
     r = client.post(
         "/api/v1/groups", headers={"Authorization": f"Bearer {a['secret_key']}"},
         json={"name": "research-team"},
@@ -322,7 +322,7 @@ def test_group_name_uppercase_rejected(client):
 
 
 def test_target_lookup_case_insensitive(client):
-    """Nama agent/group di-lookup tanpa peduli huruf besar-kecil (COLLATE NOCASE)."""
+    """Agent/group names are looked up case-insensitively (COLLATE NOCASE)."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     data = send(client, a["secret_key"], "direct", "HERMES-B", "halo")
@@ -352,7 +352,7 @@ def test_cursor_since_id_and_limit(client):
     assert d["next_since_id"] == 3
     assert d["has_more"] is False
 
-    # since_id di ujung: tidak ada pesan baru.
+    # since_id at the end: no new messages.
     d2 = fetch(client, b["secret_key"], since_id=3)
     assert d2["messages"] == []
     assert d2["next_since_id"] == 3
@@ -386,7 +386,7 @@ def test_reply_to(client):
     msgs = fetch(client, a["secret_key"])["messages"]
     assert msgs[-1]["reply_to"] == first["message_id"]
 
-    # reply ke pesan yang tidak ada / tidak terlihat.
+    # reply to a message that does not exist / is not visible.
     r = client.post(
         "/api/v1/send-message",
         headers={"Authorization": f"Bearer {b['secret_key']}"},

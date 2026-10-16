@@ -1,4 +1,4 @@
-"""Unduhan file streaming ke downloads/ dengan verifikasi SHA-256."""
+"""Streaming file downloads to downloads/ with SHA-256 verification."""
 import hashlib
 import os
 import re
@@ -8,7 +8,7 @@ from pathlib import Path
 CHUNK = 64 * 1024
 SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
-# Kegagalan yang layak diulang di siklus polling berikutnya.
+# Failures worth retrying in the next polling cycle.
 RETRYABLE = (ConnectionError, TimeoutError)
 
 
@@ -25,7 +25,7 @@ class FileHandler:
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
     def _unique_dest(self, original: str) -> Path:
-        """Path di downloads/; kalau nama sudah ada, tambah akhiran angka."""
+        """Path in downloads/; if the name already exists, append a numeric suffix."""
         dest = self.download_dir / original
         n = 1
         while dest.exists():
@@ -39,13 +39,13 @@ class FileHandler:
         sha_expected: str | None, scope: str, peer: str, memory,
         row_id: int | None = None,
     ) -> Path:
-        """Inti unduhan: stream ke disk, verifikasi ukuran + SHA-256,
-        catat files_history (baris baru, atau perbarui baris `row_id` kalau
-        ini percobaan ulang).
+        """Core of the download: stream to disk, verify size + SHA-256,
+        record files_history (a new row, or update the `row_id` row if
+        this is a retry).
 
-        Kegagalan sementara (jaringan) dicatat `pending` supaya dicoba lagi
-        di siklus berikutnya; kegagalan permanen (hash/ukuran tidak cocok)
-        dicatat `failed`. File parsial selalu dihapus.
+        Transient failures (network) are recorded as `pending` so they are
+        retried in the next cycle; permanent failures (hash/size mismatch)
+        are recorded as `failed`. Partial files are always deleted.
         """
         original = safe_local_name(original)
         if row_id is None:
@@ -71,7 +71,7 @@ class FileHandler:
                         size += len(chunk)
         except RETRYABLE:
             dest.unlink(missing_ok=True)
-            memory.update_file_status(row_id, "pending")  # coba lagi nanti
+            memory.update_file_status(row_id, "pending")  # retry later
             raise
         except Exception:
             dest.unlink(missing_ok=True)
@@ -95,7 +95,7 @@ class FileHandler:
         return dest
 
     def download(self, api, msg: dict, memory) -> Path:
-        """Unduh file dari pesan masuk (dipanggil poller)."""
+        """Download a file from an incoming message (called by the poller)."""
         info = msg["file"]
         return self._save_stream(
             api,
@@ -109,7 +109,7 @@ class FileHandler:
         )
 
     def download_by_id(self, api, file_meta: dict, memory) -> Path:
-        """Unduh file langsung dengan file_id (dari daftar /files)."""
+        """Download a file directly by file_id (from the /files listing)."""
         return self._save_stream(
             api,
             file_id=file_meta["file_id"],
@@ -122,7 +122,7 @@ class FileHandler:
         )
 
     def retry_pending(self, api, memory) -> int:
-        """Coba lagi unduhan yang tertunda (status pending)."""
+        """Retry downloads that are pending (status pending)."""
         recovered = 0
         for row in memory.pending_downloads():
             try:
@@ -135,7 +135,7 @@ class FileHandler:
                     scope=row["scope"],
                     peer=row["peer"],
                     memory=memory,
-                    row_id=row["id"],  # perbarui baris yang sama
+                    row_id=row["id"],  # update the same row
                 )
                 recovered += 1
             except Exception as exc:

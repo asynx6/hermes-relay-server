@@ -1,4 +1,4 @@
-/* Hermes Relay Dashboard — light & dark theme lewat CSS variable. */
+/* Hermes Relay Dashboard — light & dark theme via CSS variables. */
 
 :root {
   --bg: #f4f6fa;
@@ -243,7 +243,7 @@ tbody tr:hover { background: var(--surface-2); }
 #password-message.ok { color: var(--ok); }
 #password-message.err { color: var(--danger); }
 
-/* ---------- Bantuan ---------- */
+/* ---------- Help ---------- */
 .help-doc { max-width: 760px; line-height: 1.6; }
 .help-doc h3 { margin: 18px 0 8px; font-size: 15px; }
 .help-doc ol, .help-doc ul { margin: 0; padding-left: 22px; }
@@ -256,7 +256,7 @@ tbody tr:hover { background: var(--surface-2); }
   font-size: 13px;
 }
 
-/* ---------- Composer & form kecil di sidebar ---------- */
+/* ---------- Composer & small sidebar form ---------- */
 select {
   padding: 9px 12px;
   border: 1px solid var(--border);

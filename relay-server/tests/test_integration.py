@@ -1,7 +1,7 @@
-"""Test integrasi Fase 4: server uvicorn sungguhan + client Hermes nyata.
+"""Phase 4 integration tests: a real uvicorn server + a real Hermes client.
 
-Setiap skenario memakai agent client lengkap (registrasi, memory SQLite
-lokal, poller, file handler) yang berkomunikasi via HTTP ke server live.
+Each scenario uses a full client agent (registration, local SQLite
+memory, poller, file handler) communicating over HTTP with the live server.
 """
 import hashlib
 import os
@@ -26,7 +26,7 @@ REGISTRATION_KEY = "test-registration-key"
 
 
 class AgentHarness:
-    """Agent Hermes sungguhan dengan polling sekali-jalan (poll_once)."""
+    """A real Hermes agent with single-shot polling (poll_once)."""
 
     def __init__(self, base_url: str, name: str, workdir: Path):
         self.dir = Path(workdir)
@@ -61,10 +61,10 @@ class AgentHarness:
         return self.poller.poll_once()
 
     def _resolve(self, target_type: str, name: str) -> str:
-        """Nama -> ID publik (ag_/gr_). Addressing selalu pasangan ID+nama.
+        """Name -> public ID (ag_/gr_). Addressing is always an ID+name pair.
 
-        Hasil di-cache: direktori tidak berubah selama satu tes, dan tes
-        beban mengirim >1000 pesan ke target yang sama-sama diulang.
+        The result is cached: the directory does not change during a single test,
+        and the load test sends >1000 messages to the same repeated targets.
         """
         key = (target_type, name.lower())
         if key in self._id_cache:
@@ -109,7 +109,7 @@ class AgentHarness:
         )
 
     def poll_until(self, count: int, timeout: float = 15.0) -> bool:
-        """Poll sampai menerima `count` pesan atau timeout."""
+        """Poll until `count` messages are received or timeout."""
         deadline = time.time() + timeout
         while time.time() < deadline and len(self.received) < count:
             self.poll()
@@ -124,13 +124,13 @@ def agents_dir(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _relax_rate_limits(monkeypatch):
-    """Test mendaftarkan belasan agent; limit 5/menit terlalu ketat."""
+    """The test registers a dozen agents; the 5/minute limit is too strict."""
     monkeypatch.setattr("app.config.settings.rate_limit_register", "10000/minute")
     monkeypatch.setattr("app.config.settings.rate_limit_default", "100000/minute")
 
 
 # ---------------------------------------------------------------------------
-# Skenario 1-4: messaging
+# Scenarios 1-4: messaging
 # ---------------------------------------------------------------------------
 
 def test_scenario_1_direct_message(live_server, agents_dir):
@@ -193,7 +193,7 @@ def test_scenario_4_new_member_history(live_server, agents_dir):
 
 
 # ---------------------------------------------------------------------------
-# Skenario 5-8: file
+# Scenarios 5-8: files
 # ---------------------------------------------------------------------------
 
 def test_scenario_5_direct_file_5mb(live_server, agents_dir, tmp_path):
@@ -254,7 +254,7 @@ def test_scenario_7_upload_over_limit(live_server, agents_dir, tmp_path, monkeyp
     a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
 
-    # max_upload_bytes adalah property; patch di class agar instance melihat nilai baru.
+    # max_upload_bytes is a property; patch it on the class so the instance sees the new value.
     from app.config import Settings
 
     monkeypatch.setattr(Settings, "max_upload_bytes", 4096)
@@ -265,12 +265,12 @@ def test_scenario_7_upload_over_limit(live_server, agents_dir, tmp_path, monkeyp
         a.upload(src, "direct", "hermes-b")
     assert "FILE_TOO_LARGE" in str(exc.value) or "413" in str(exc.value)
 
-    # Tidak ada sisa file di filemanager server.
+    # No leftover files in the server filemanager.
     leftovers = [
         p for p in settings.filemanager_dir.iterdir() if p.is_file() and p.name != ".gitkeep"
     ]
     assert leftovers == []
-    # Penerima tidak menerima pesan apa pun.
+    # The recipient receives no message at all.
     assert b.poll() == (True, False)
     assert b.received == []
 
@@ -284,7 +284,7 @@ def test_scenario_8_dangerous_filename(live_server, agents_dir, tmp_path):
     src.write_bytes(payload)
 
     data = a.upload(src, "direct", "hermes-b")
-    # Nama aman di sisi penerima, isi utuh.
+    # Safe name on the recipient side, content intact.
     assert b.poll_until(1)
     row = b.memory.conn.execute(
         "SELECT * FROM files_history ORDER BY id DESC LIMIT 1"
@@ -296,7 +296,7 @@ def test_scenario_8_dangerous_filename(live_server, agents_dir, tmp_path):
 
 
 def test_scenario_8b_dangerous_upload_name(live_server, agents_dir, tmp_path):
-    """Nama file jahat diunggah apa adanya: server harus menyimpan nama acak."""
+    """A malicious file name is uploaded as-is: the server must store a random name."""
     a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
 
@@ -320,7 +320,7 @@ def test_scenario_8b_dangerous_upload_name(live_server, agents_dir, tmp_path):
         )
     assert resp.status_code == 201, resp.text
     data = resp.json()["data"]
-    assert data["original_name"] == "passwd"  # basename tersanitasi
+    assert data["original_name"] == "passwd"  # sanitized basename
     assert "/" not in data["original_name"]
 
     from conftest import settings
@@ -333,7 +333,7 @@ def test_scenario_8b_dangerous_upload_name(live_server, agents_dir, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Skenario 9-11: auth, pemulihan, idempotency
+# Scenarios 9-11: auth, recovery, idempotency
 # ---------------------------------------------------------------------------
 
 def test_scenario_9_auth_failures(live_server, agents_dir):
@@ -351,7 +351,7 @@ def test_scenario_9_auth_failures(live_server, agents_dir):
     )
     assert r.status_code == 401
 
-    # Token asli ditolak server: client berhenti polling, bukan retak.
+    # The real token is rejected by the server: the client stops polling, not crashing.
     agent = AgentHarness(live_server.base_url, "hermes-bad", agents_dir / "bad")
     agent.config.secret_key = "hsk_palsu"
     agent.api.session.headers["Authorization"] = "Bearer hsk_palsu"
@@ -362,15 +362,15 @@ def test_scenario_9_auth_failures(live_server, agents_dir):
 def test_scenario_10_server_outage_recovery(live_server, agents_dir):
     a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
-    # Resolusi ID dilakukan selagi server masih hidup.
+    # ID resolution is done while the server is still alive.
     peer_id = b._resolve("direct", "hermes-a")
 
-    # Server dimatikan saat agent polling.
+    # The server is shut down while the agent is polling.
     live_server.stop()
     reachable, _ = b.poll()
     assert reachable is False
 
-    # Pesan keluar gagal terkirim: tetap di outbox, tidak hilang.
+    # The outgoing message fails to send: it stays in the outbox, not lost.
     client_msg_id = str(uuid.uuid4())
     b.memory.save_outgoing("direct", "hermes-a", peer_id, "pesan-saat-mati", client_msg_id)
     with pytest.raises(RelayUnavailable):
@@ -381,18 +381,18 @@ def test_scenario_10_server_outage_recovery(live_server, agents_dir):
     assert len(pending) == 1
     assert pending[0]["content"] == "pesan-saat-mati"
 
-    # Server dinyalakan lagi.
+    # The server is started again.
     live_server.start()
 
-    # Outbox terkirim setelah pemulihan.
+    # The outbox is delivered after recovery.
     b.poller.flush_outbox()
     assert b.memory.pending_outbox() == []
 
-    # A menerima pesan yang dikirim selama outage.
+    # A receives the message that was sent during the outage.
     assert a.poll_until(1)
     assert a.received[0]["content"] == "pesan-saat-mati"
 
-    # Pesan masuk saat server mati tidak hilang: A kirim lagi lalu B ambil.
+    # Messages arriving while the server is down are not lost: A sends again and B fetches.
     a.send("direct", "hermes-b", "setelah-pulih")
     assert b.poll_until(1)
     assert b.received[0]["content"] == "setelah-pulih"
@@ -413,17 +413,17 @@ def test_scenario_11_idempotent_double_send(live_server, agents_dir):
     assert b.poll_until(1)
     assert len(b.received) == 1
 
-    # Satu baris di memory lokal dan satu pesan di server.
+    # One row in local memory and one message on the server.
     rows = b.memory.conn.execute("SELECT * FROM conversations").fetchall()
     assert len(rows) == 1
 
 
 # ---------------------------------------------------------------------------
-# Skenario 12: beban
+# Scenario 12: load
 # ---------------------------------------------------------------------------
 
 def test_scenario_12_load_10_agents(live_server, agents_dir):
-    """10 agent polling interval 3s; ukur latensi kirim dan pastikan semua terkirim."""
+    """10 agents polling every 3s; measure send latency and ensure all are delivered."""
     n_agents = 10
     msgs_per_agent = 15
 
@@ -442,7 +442,7 @@ def test_scenario_12_load_10_agents(live_server, agents_dir):
                 sender.send("direct", target.config.agent_name, f"m{j}")
                 latencies.append(time.perf_counter() - t0)
 
-    # Semua agent polling sampai semua pesan masuk.
+    # All agents poll until all messages arrive.
     expected = msgs_per_agent * (n_agents - 1)
     deadline = time.time() + 60
     while time.time() < deadline:
@@ -464,12 +464,12 @@ def test_scenario_12_load_10_agents(live_server, agents_dir):
         f"\n[load] {len(latencies)} pesan, {n_agents} agent: "
         f"p50={p50*1000:.1f}ms p95={p95*1000:.1f}ms max={latencies[-1]*1000:.1f}ms"
     )
-    # Batas longgar: kegagalan nyata adalah pesan hilang, bukan performa.
+    # Loose bound: the real failure is a lost message, not performance.
     assert p95 < 1.0
 
 
 def test_scenario_13_file_manager_by_id(live_server, agents_dir, tmp_path):
-    """File manager sisi agent: lihat daftar (nama, ID, ukuran) lalu unduh by ID."""
+    """Agent-side file manager: list files (name, ID, size) then download by ID."""
     a = AgentHarness(live_server.base_url, "hermes-a", agents_dir / "a")
     b = AgentHarness(live_server.base_url, "hermes-b", agents_dir / "b")
     c = AgentHarness(live_server.base_url, "hermes-c", agents_dir / "c")
@@ -482,7 +482,7 @@ def test_scenario_13_file_manager_by_id(live_server, agents_dir, tmp_path):
     data = a.upload(src, "direct", "hermes-b", caption="Dataset final")
     file_id = data["file_id"]
 
-    # Penerima melihat file dengan ketiga atribut: nama, ID, ukuran.
+    # The recipient sees the file with all three attributes: name, ID, size.
     listing = b.api.list_files()
     assert listing["total"] == 1
     entry = listing["files"][0]
@@ -490,12 +490,12 @@ def test_scenario_13_file_manager_by_id(live_server, agents_dir, tmp_path):
     assert entry["original_name"] == "dataset-final.csv"
     assert entry["size_bytes"] == len(payload)
 
-    # Unduh langsung dengan file_id (bukan lewat pesan).
+    # Download directly with the file_id (not via a message).
     dest = b.file_handler.download_by_id(b.api, entry, b.memory)
     assert dest.is_file()
     assert hashlib.sha256(dest.read_bytes()).hexdigest() == expected
 
-    # Riwayat lokal mencatat unduhan berdasarkan ID.
+    # The local history records the download by ID.
     row = b.memory.conn.execute(
         "SELECT * FROM files_history ORDER BY id DESC LIMIT 1"
     ).fetchone()
@@ -503,9 +503,9 @@ def test_scenario_13_file_manager_by_id(live_server, agents_dir, tmp_path):
     assert row["file_id"] == file_id
     assert row["sha256"] == expected
 
-    # Agent lain tidak melihat file direct A->B.
+    # Other agents do not see A->B direct files.
     assert c.api.list_files()["total"] == 0
 
-    # Unduh ulang dengan ID yang tidak ada -> error jelas.
+    # Re-download with a nonexistent ID -> a clear error.
     with pytest.raises(RuntimeError):
         b.api.download_file("fl_tidakada000")

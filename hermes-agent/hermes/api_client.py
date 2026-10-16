@@ -1,8 +1,8 @@
-"""Klien HTTP ke relay server: satu Session, retry dengan backoff + jitter.
+"""HTTP client for the relay server: a single Session, retries with backoff + jitter.
 
-Retry hanya untuk kegagalan sementara (ConnectionError, Timeout, 429, 5xx).
-Kesalahan 4xx lain bersifat permanen dan langsung dikembalikan ke pemanggil.
-send-message dan upload-file aman di-retry karena client_msg_id idempotent.
+Retries happen only for transient failures (ConnectionError, Timeout, 429, 5xx).
+Other 4xx errors are permanent and are returned directly to the caller.
+send-message and upload-file are safe to retry because client_msg_id is idempotent.
 """
 import hashlib
 import json
@@ -18,16 +18,16 @@ AUTH_REJECTED_MSG = "Token ditolak server. Hentikan polling dan periksa config."
 
 
 class RelayUnavailable(Exception):
-    """Server tidak bisa dijangkau setelah semua percobaan."""
+    """Server could not be reached after all attempts."""
 
 
 class AuthRejected(Exception):
-    """Server menolak token (401). Polling harus berhenti, bukan retry."""
+    """Server rejected the token (401). Polling must stop, not retry."""
 
 
 def parse_json(resp) -> dict:
-    """Parse respons JSON dengan aman. Halaman HTML dari proxy/CDN tidak
-    boleh menjadi JSONDecodeError mentah — jadi error yang informatif."""
+    """Safely parse a JSON response. An HTML page from a proxy/CDN must not
+    surface as a raw JSONDecodeError — turn it into an informative error."""
     try:
         return resp.json()
     except (json.JSONDecodeError, ValueError):
@@ -71,11 +71,11 @@ class RelayAPI:
     def _backoff(self, attempt: int) -> None:
         time.sleep(min(60.0, self.retry_base * 2**attempt) * random.uniform(0.5, 1.5))
 
-    # ---- registrasi ----
+    # ---- registration ----
 
     def register(self, registration_nonce: str | None = None) -> dict:
-        """Daftarkan agent. Kalau nonce dikirim dan respons sebelumnya
-        hilang, server memutar ulang secret yang sama alih-alih 409."""
+        """Register the agent. If the nonce is sent and the previous response
+        was lost, the server replays the same secret instead of returning 409."""
         payload = {
             "name": self.config.agent_name,
             "description": "Hermes agent",
@@ -98,7 +98,7 @@ class RelayAPI:
             )
         return parse_json(resp)["data"]
 
-    # ---- pesan ----
+    # ---- messages ----
 
     def send_message(self, target_type: str, target_id: str, target_name: str,
                      content: str, client_msg_id: str,
@@ -106,9 +106,9 @@ class RelayAPI:
                      msg_type: str = "text",
                      task_id: str | None = None,
                      task_status: str | None = None) -> dict:
-        """Kirim pesan. Target selalu pasangan (target_id, target_name).
+        """Send a message. The target is always a pair (target_id, target_name).
 
-        msg_type 'task'/'result' memakai task_id untuk pola RPC ringan.
+        msg_type 'task'/'result' uses task_id for a lightweight RPC pattern.
         """
         resp = request_with_retry(
             self.session,
@@ -134,8 +134,8 @@ class RelayAPI:
         return body["data"]
 
     def fetch_messages(self, since_id: int, limit: int = 50, wait: int = 0) -> dict:
-        """Ambil pesan baru. `wait>0` mengaktifkan long polling: request
-        ditahan server sampai ada pesan atau timeout `wait` detik."""
+        """Fetch new messages. `wait>0` enables long polling: the request
+        is held by the server until a message arrives or the `wait` seconds elapse."""
         timeout = (5, max(30, wait + 30))
         resp = request_with_retry(
             self.session,
@@ -149,10 +149,10 @@ class RelayAPI:
         return parse_json(resp)["data"]
 
     def stream_events(self, since_id: int | None = None, read_timeout: int = 120):
-        """Generator SSE: `yield (event, data)` dari `GET /events`.
+        """SSE generator: `yield (event, data)` from `GET /events`.
 
-        Dipakai kalau `SSE_ENABLED=true` di server. Pemanggil harus siap
-        menangani koneksi yang putus dan menyambung ulang.
+        Used when `SSE_ENABLED=true` on the server. The caller must be ready
+        to handle a dropped connection and reconnect.
         """
         params = {"since_id": since_id} if since_id is not None else {}
         resp = self.session.get(
@@ -176,7 +176,7 @@ class RelayAPI:
                 if raw is None:
                     continue
                 if raw.startswith(":"):
-                    continue  # komentar/heartbeat
+                    continue  # comment/heartbeat
                 if raw == "":
                     event_name = None
                     continue
@@ -191,11 +191,11 @@ class RelayAPI:
         finally:
             resp.close()
 
-    # ---- file ----
+    # ---- files ----
 
     def list_files(self, limit: int = 50, offset: int = 0) -> dict:
-        """Daftar file yang boleh diakses agent ini (diunggah sendiri,
-        diterima langsung, atau di grup tempatnya anggota)."""
+        """List files this agent may access (uploaded by itself, received
+        directly, or in a group it is a member of)."""
         resp = request_with_retry(
             self.session,
             "GET",
@@ -209,8 +209,8 @@ class RelayAPI:
     def upload_file(self, path: str, target_type: str, target_id: str,
                     target_name: str, client_msg_id: str,
                     caption: str | None = None) -> dict:
-        """Upload dengan pembukaan ulang file di tiap percobaan.
-        Target selalu pasangan (target_id, target_name)."""
+        """Upload, reopening the file on each attempt.
+        The target is always a pair (target_id, target_name)."""
         size = os.path.getsize(path)
         if size > self.config.max_upload_mb * 1024 * 1024:
             raise ValueError(
@@ -247,7 +247,7 @@ class RelayAPI:
         raise RelayUnavailable(f"upload {path} gagal setelah {self.retry_max + 1} percobaan ({last_error})")
 
     def download_file(self, file_id: str):
-        """Stream unduhan. Mengembalikan objek response (chunk via iter_content)."""
+        """Stream a download. Returns the response object (chunks via iter_content)."""
         last_error = ""
         for attempt in range(self.retry_max + 1):
             try:
@@ -275,10 +275,10 @@ class RelayAPI:
             f"download-file/{file_id} gagal setelah {self.retry_max + 1} percobaan ({last_error})"
         )
 
-    # ---- direktori ----
+    # ---- directory ----
 
     def list_agents(self) -> list[dict]:
-        """Semua agent terdaftar (nama + ID) — untuk pilih tujuan chat."""
+        """All registered agents (name + ID) — for choosing a chat target."""
         resp = request_with_retry(
             self.session,
             "GET",
@@ -289,7 +289,7 @@ class RelayAPI:
         return parse_json(resp)["data"]["agents"]
 
     def list_groups(self) -> list[dict]:
-        """Semua grup + status keanggotaan agent ini."""
+        """All groups + this agent's membership status."""
         resp = request_with_retry(
             self.session,
             "GET",
@@ -302,7 +302,7 @@ class RelayAPI:
     # ---- ack & receipt ----
 
     def ack(self, message_ids: list[int], status: str = "delivered") -> dict:
-        """Konfirmasi ke server bahwa pesan sudah diterima/dibaca."""
+        """Confirm to the server that the messages have been received/read."""
         resp = request_with_retry(
             self.session,
             "POST",
@@ -314,7 +314,7 @@ class RelayAPI:
         return parse_json(resp)["data"]
 
     def receipts(self, message_ids: list[int]) -> list[dict]:
-        """Status penerimaan pesan yang kita kirim."""
+        """Receipt status of the messages we sent."""
         resp = request_with_retry(
             self.session,
             "GET",
@@ -326,7 +326,7 @@ class RelayAPI:
         return parse_json(resp)["data"]["receipts"]
 
     def get_task(self, task_id: str) -> dict:
-        """Riwayat satu tugas (task + result)."""
+        """History of a single task (task + result)."""
         resp = request_with_retry(
             self.session,
             "GET",
@@ -336,7 +336,7 @@ class RelayAPI:
         )
         return parse_json(resp)["data"]
 
-    # ---- grup ----
+    # ---- groups ----
 
     def create_group(self, name: str, description: str | None = None) -> dict:
         resp = request_with_retry(
@@ -414,7 +414,7 @@ class RelayAPI:
         return body["data"]
 
     def set_join_code(self, name: str, join_code: str | None = None) -> dict:
-        """Atur join_code (None = dibuatkan otomatis oleh server)."""
+        """Set the join_code (None = generated automatically by the server)."""
         resp = request_with_retry(
             self.session,
             "POST",
@@ -441,7 +441,7 @@ class RelayAPI:
             raise RuntimeError(f"Hapus join_code gagal: {resp.status_code} {body}")
         return body["data"]
 
-    # ---- token ----
+    # ---- tokens ----
 
     def create_token(self, scopes: list[str], label: str | None = None,
                      expires_in_days: int | None = None) -> dict:
@@ -482,7 +482,7 @@ class RelayAPI:
         return body["data"]
 
     def rotate_token(self) -> dict:
-        """Putar kunci utama. Kunci lama tetap valid selama grace di server."""
+        """Rotate the primary key. The old key stays valid for the grace period on the server."""
         resp = request_with_retry(
             self.session,
             "POST",
@@ -495,7 +495,7 @@ class RelayAPI:
             raise RuntimeError(f"Rotasi token gagal: {resp.status_code} {body}")
         return body["data"]
 
-    # ---- unggahan berpotong (chunked + resumable) ----
+    # ---- chunked uploads (chunked + resumable) ----
 
     def _sha256_of(self, path: str) -> str:
         digest = hashlib.sha256()
@@ -535,11 +535,11 @@ class RelayAPI:
         chunk_mb: int = 5,
         on_progress=None,
     ) -> dict:
-        """Unggah file besar secara berpotong dan resumable.
+        """Upload a large file in chunks and resumably.
 
-        Kalau server sudah punya file dengan SHA-256 + ukuran yang sama
-        (dan boleh dilihat agent ini), tidak ada byte yang dikirim —
-        `/init` menandai `deduplicated` dan kita langsung `/complete`.
+        If the server already has a file with the same SHA-256 + size
+        (and this agent may view it), no bytes are sent —
+        `/init` marks it `deduplicated` and we go straight to `/complete`.
         """
         size = os.path.getsize(path)
         sha = self._sha256_of(path)
@@ -605,7 +605,7 @@ class RelayAPI:
                     if attempt < self.retry_max:
                         self._backoff(attempt)
                 if not ok:
-                    # Koneksi bermasalah: tanyakan status, lanjut dari yang kurang.
+                    # Connection problem: query the status, continue from what is missing.
                     state = self.upload_status(upload_id)
                     done = set(state["received"])
                     if index in done:

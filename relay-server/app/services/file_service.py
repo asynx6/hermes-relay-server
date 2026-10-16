@@ -1,20 +1,21 @@
-"""Penyimpanan file: validasi, staging + commit atomik, otorisasi unduhan.
+"""File storage: validation, staging + atomic commit, download authorization.
 
-Alur unggahan dirancang untuk banyak agent paralel:
+The upload flow is designed for many parallel agents:
 
-1. Unggahan distream ke file **staging** (`filemanager/.staging/`) di luar
-   transaksi database, sambil menghitung ukuran nyata dan SHA-256. Lock DB
-   tidak ditahan selama transfer jaringan — hanya detik-detik terakhir.
-2. Setelah transfer selesai, transaksi singkat (BEGIN IMMEDIATE) melakukan:
-   cek duplikat `client_msg_id` -> resolusi target -> cek kuota ->
-   `os.replace` (atomik) staging ke nama final `<uuid4>.<ext>` ->
-   INSERT `file_logs` + `messages` -> COMMIT.
-3. Semua kegagalan membuang file staging; tidak ada file parsial yang
-   pernah terlihat di lokasi final. Proses yang mati di antara rename dan
-   commit bisa menyisakan file orphan — disapu `scripts/cleanup.py`.
+1. The upload is streamed to a **staging** file (`filemanager/.staging/`)
+   outside the database transaction, while computing the real size and
+   SHA-256. The DB lock is not held during the network transfer — only for
+   the last few moments.
+2. Once the transfer is done, a short transaction (BEGIN IMMEDIATE) does:
+   duplicate `client_msg_id` check -> target resolution -> quota check ->
+   `os.replace` (atomic) of the staging file to the final name
+   `<uuid4>.<ext>` -> INSERT `file_logs` + `messages` -> COMMIT.
+3. Every failure discards the staging file; no partial file is ever visible
+   at the final location. A process that dies between the rename and the
+   commit may leave an orphan file — swept by `scripts/cleanup.py`.
 
-Nama file dari client tidak pernah menjadi path di disk: file disimpan
-sebagai `<uuid4>.<ext>`, dan nama asli hanya hidup di kolom `original_name`.
+A client-provided filename never becomes a path on disk: files are stored as
+`<uuid4>.<ext>`, and the original name lives only in the `original_name` column.
 """
 import hashlib
 import os
@@ -35,7 +36,7 @@ SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 STAGING_DIRNAME = ".staging"
 
 # ---------------------------------------------------------------------------
-# Deteksi tipe dari magic bytes (kunci magic, mime, perlu penolakan)
+# Type detection from magic bytes (magic key, mime, needs rejection)
 # ---------------------------------------------------------------------------
 
 MAGIC_SIGNATURES: list[tuple[bytes, str, bool]] = [
@@ -44,7 +45,7 @@ MAGIC_SIGNATURES: list[tuple[bytes, str, bool]] = [
     (b"GIF87a", "image/gif", False),
     (b"GIF89a", "image/gif", False),
     (b"%PDF-", "application/pdf", False),
-    (b"PK\x03\x04", "application/zip", False),      # juga docx/xlsx/pptx/jar
+    (b"PK\x03\x04", "application/zip", False),      # also docx/xlsx/pptx/jar
     (b"PK\x05\x06", "application/zip", False),
     (b"PK\x07\x08", "application/zip", False),
     (b"\x1f\x8b", "application/gzip", False),
@@ -53,13 +54,13 @@ MAGIC_SIGNATURES: list[tuple[bytes, str, bool]] = [
     (b"ID3", "audio/mpeg", False),
     (b"fLaC", "audio/flac", False),
     (b"OggS", "application/ogg", False),
-    (b"RIFF", "audio/wav", False),                   # riff container; AVI juga riff
+    (b"RIFF", "audio/wav", False),                   # riff container; AVI is riff too
     (b"\x1aE\xdf\xa3", "video/webm", False),         # matroska/webm
     (b"SQLite format 3\x00", "application/vnd.sqlite3", False),
     (b"\x00asm", "application/wasm", False),
-    (b"\xd0\xcf\x11\xe0", "application/x-ole-storage", False),  # doc/xls lama
+    (b"\xd0\xcf\x11\xe0", "application/x-ole-storage", False),  # legacy doc/xls
     (b"\xef\xbb\xbf", "text/plain", False),          # UTF-8 BOM
-    # Payload yang bisa dieksekusi: ditolak walau ekstensinya terlihat aman.
+    # Executable payloads: rejected even if the extension looks safe.
     (b"MZ", "application/x-dosexec", True),
     (b"\x7fELF", "application/x-executable", True),
     (b"\xfe\xed\xfa\xce", "application/x-mach-binary", True),
@@ -84,7 +85,7 @@ EXT_TO_MIME = {
 
 
 def sanitize_filename(name: str) -> str:
-    """Nama asli hanya untuk tampilan. Nama dari client tidak pernah jadi path di disk."""
+    """The original name is for display only. A client name never becomes a path on disk."""
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     name = os.path.basename(name.replace("\\", "/"))
     name = SAFE_CHARS.sub("_", name).lstrip(".")
@@ -92,7 +93,7 @@ def sanitize_filename(name: str) -> str:
 
 
 def safe_extension(original: str) -> str:
-    """Ekstensi sudah disanitasi; tolak kalau masuk daftar blokir."""
+    """The extension is already sanitized; reject if it is in the blocklist."""
     ext = os.path.splitext(sanitize_filename(original))[1].lower()
     if ext in settings.blocked_ext_set:
         raise api_error(415, "UNSUPPORTED_TYPE", f"Ekstensi '{ext}' diblokir server.")
@@ -100,12 +101,12 @@ def safe_extension(original: str) -> str:
 
 
 def sniff_content(head: bytes) -> tuple[str | None, bool, str]:
-    """Deteksi tipe dari magic bytes. Kembalikan (mime, is_executable, catatan).
+    """Detect the type from magic bytes. Return (mime, is_executable, note).
 
-    Urutan penting: daftar magic dicek LEBIH DULU, dan container ISO-BMFF
-    (`....ftyp`, dipakai MP4/MOV) hanya dicek kalau tidak ada signature
-    executable yang cocok. Kalau urutan dibalik, file `MZ....ftyp...` bisa
-    lolos sebagai video.
+    Order matters: the magic list is checked FIRST, and the ISO-BMFF container
+    (`....ftyp`, used by MP4/MOV) is only checked if no executable signature
+    matches. If the order were reversed, a `MZ....ftyp...` file could pass as
+    a video.
     """
     if not head:
         return None, False, "empty"
@@ -114,14 +115,14 @@ def sniff_content(head: bytes) -> tuple[str | None, bool, str]:
             return mime, is_exec, "magic"
     if head[4:8] == b"ftyp":
         return "video/mp4", False, "isobmff"
-    # Teks (semua byte printable / whitespace)?
+    # Text (all bytes printable / whitespace)?
     if all(b < 128 and (b in (9, 10, 13) or 32 <= b < 127) for b in head):
         return "text/plain", False, "text"
     return None, False, "unknown"
 
 
 class UploadRejected(Exception):
-    """Unggahan ditolak validasi; membawa kode HTTP dan kode error terstruktur."""
+    """Upload rejected by validation; carries the HTTP code and structured error code."""
 
     def __init__(self, status_code: int, code: str, message: str):
         super().__init__(message)
@@ -131,17 +132,17 @@ class UploadRejected(Exception):
 
 
 def staging_path() -> Path:
-    """Path staging unik per unggahan."""
+    """Unique staging path per upload."""
     staging = settings.filemanager_dir / STAGING_DIRNAME
     staging.mkdir(parents=True, exist_ok=True)
     return staging / f"{uuid.uuid4().hex}.part"
 
 
 async def stage_upload(upload: UploadFile, dest: Path, max_bytes: int) -> dict:
-    """Stream unggahan ke staging sambil menghitung ukuran nyata + SHA-256.
+    """Stream the upload to staging while computing the real size + SHA-256.
 
-    Tolak: melebihi batas ukuran (413), file kosong (400), payload yang bisa
-    dieksekusi (415). File staging selalu dibuang kalau ada kegagalan.
+    Reject: exceeds the size limit (413), empty file (400), executable
+    payload (415). The staging file is always discarded on any failure.
     """
     size = 0
     digest = hashlib.sha256()
@@ -195,12 +196,12 @@ async def stage_upload(upload: UploadFile, dest: Path, max_bytes: int) -> dict:
 
 
 def resolve_mime(detected: str | None, declared: str | None, filename: str) -> str:
-    """Tentukan mime final.
+    """Determine the final mime.
 
-    - Deteksi biner spesifik (mis. image/png, application/pdf) paling dipercaya.
-    - Deteksi "text/plain" generik: peta ekstensi yang menang kalau konsisten
-      (csv, md, json, xml...), karena magic bytes tidak bisa membedakannya.
-    - Tidak terdeteksi: percaya pada deklarasi client, fallback octet-stream.
+    - A specific binary detection (e.g. image/png, application/pdf) is most trusted.
+    - Generic "text/plain" detection: the extension map wins if consistent
+      (csv, md, json, xml...), because magic bytes cannot tell them apart.
+    - Not detected: trust the client's declaration, fall back to octet-stream.
     """
     if detected and detected != "text/plain":
         return detected
@@ -213,7 +214,7 @@ def resolve_mime(detected: str | None, declared: str | None, filename: str) -> s
 
 
 def _unique_final_path(ext: str, conn) -> Path:
-    """Path final `<uuid4>.<ext>` yang dijamin unik di disk dan di file_logs."""
+    """Final path `<uuid4>.<ext>` guaranteed unique on disk and in file_logs."""
     fm_root = settings.filemanager_dir.resolve()
     for _ in range(10):
         candidate = (fm_root / f"{uuid.uuid4().hex}{ext}").resolve()
@@ -231,12 +232,12 @@ def _unique_final_path(ext: str, conn) -> Path:
 
 
 def finalize(staging: Path, ext: str, conn) -> Path:
-    """Pindahkan staging ke nama final `<uuid4>.<ext>` secara atomik.
+    """Move staging to the final name `<uuid4>.<ext>` atomically.
 
-    Nama final dijamin unik: di-loop sampai tidak ada di disk maupun di
-    tabel file_logs, jadi dua unggahan dengan nama asli yang sama tidak
-    mungkin saling menimpa. `os.replace` atomik pada filesystem yang sama,
-    sehingga pembaca tidak pernah melihat file setengah tertulis.
+    The final name is guaranteed unique: it is looped until it exists neither
+    on disk nor in the file_logs table, so two uploads with the same original
+    name cannot overwrite each other. `os.replace` is atomic on the same
+    filesystem, so readers never see a half-written file.
     """
     candidate = _unique_final_path(ext, conn)
     os.replace(staging, candidate)
@@ -244,14 +245,14 @@ def finalize(staging: Path, ext: str, conn) -> Path:
 
 
 def dedupe_source(conn, agent_row_id: int, sha256: str, size_bytes: int) -> dict | None:
-    """Cari file berisi sama yang **sudah boleh dilihat** agent ini.
+    """Find a file with identical content that this agent **may already see**.
 
-    Dedupe dibatasi pada file yang memang terlihat oleh pemanggil (unggahan
-    sendiri, kiriman langsung, atau grup tempatnya anggota). Kalau tidak
-    dibatasi, agent bisa menebak isi file milik orang lain hanya dengan
-    menanyakan hash-nya.
+    Dedupe is limited to files actually visible to the caller (own uploads,
+    direct deliveries, or a group it is a member of). Without this limit, an
+    agent could guess the content of someone else's file just by asking about
+    its hash.
 
-    Kembalikan dict `{stored_name, file_id, mime_type}` kalau ada, else None.
+    Return a dict `{stored_name, file_id, mime_type}` if found, else None.
     """
     row = conn.execute(
         """SELECT fl.stored_name, fl.file_id, fl.mime_type
@@ -281,12 +282,12 @@ def dedupe_source(conn, agent_row_id: int, sha256: str, size_bytes: int) -> dict
 
 
 def link_blob(source_name: str, ext: str, conn) -> Path:
-    """Buat nama final baru yang menunjuk isi blob yang sama.
+    """Create a new final name pointing to the same blob content.
 
-    Memakai hardlink: dua baris `file_logs` dengan isi identik berbagi satu
-    inode, jadi ruang disk tidak terpakai dua kali dan baru benar-benar bebas
-    ketika link terakhir dihapus. Kalau filesystem tidak mendukung hardlink,
-    fallback ke salin file biasa.
+    Uses a hardlink: two `file_logs` rows with identical content share one
+    inode, so disk space is not used twice and is only truly freed when the
+    last link is removed. If the filesystem does not support hardlinks, fall
+    back to copying the file.
     """
     source = settings.filemanager_dir / source_name
     candidate = _unique_final_path(ext, conn)
@@ -300,13 +301,13 @@ def link_blob(source_name: str, ext: str, conn) -> Path:
 
 
 def discard(path: Path | None) -> None:
-    """Buang file staging sisa (mis. request duplikat)."""
+    """Discard a leftover staging file (e.g. duplicate request)."""
     if path:
         Path(path).unlink(missing_ok=True)
 
 
 def new_file_id(conn) -> str:
-    """ID publik file yang belum dipakai (`fl_<10 hex>`)."""
+    """Unused public file ID (`fl_<10 hex>`)."""
     import secrets as _secrets
 
     while True:
@@ -318,9 +319,9 @@ def new_file_id(conn) -> str:
 
 
 def check_download_permission(conn, file_row, agent_row_id: int) -> None:
-    """Hanya uploader, penerima direct, atau anggota grup tujuan yang boleh
-    mengunduh. Anggota grup hanya boleh mengunduh file yang diunggah
-    SETELAH ia bergabung — aturan yang sama dengan filter pesan grup."""
+    """Only the uploader, the direct recipient, or a member of the target
+    group may download. A group member may only download files uploaded
+    AFTER they joined — the same rule as the group message filter."""
     if file_row is None:
         raise api_error(404, "NOT_FOUND", "File tidak ditemukan.")
     if file_row["deleted_at"]:

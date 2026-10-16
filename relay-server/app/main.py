@@ -1,4 +1,4 @@
-"""Aplikasi FastAPI: Hermes Relay Server."""
+"""FastAPI application: Hermes Relay Server."""
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
@@ -25,7 +25,7 @@ WEAK_REGISTRATION_KEYS = {"", "change-me-in-env", "change-me", "ganti-dengan-str
 
 
 def check_security_defaults() -> None:
-    """Tolak start kalau kredensial masih default pendekatan 'ganti saya'."""
+    """Refuse to start if credentials are still weak 'change-me' defaults."""
     if settings.registration_key.strip().lower() in WEAK_REGISTRATION_KEYS:
         raise SystemExit(
             "REFUSING TO START: REGISTRATION_KEY masih nilai default.\n"
@@ -84,9 +84,9 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(sqlite3.IntegrityError)
     async def integrity_handler(request: Request, exc: sqlite3.IntegrityError):
-        # Jaring pengaman: endpoint yang mengecek-lalu-INSERT tanpa transaksi
-        # bisa kena UNIQUE saat dua request bersamaan. Endpoint endpoint itu
-        # menangani IntegrityError sendiri; ini fallback agar tidak jadi 500.
+        # Safety net: endpoints that check-then-INSERT without a transaction
+        # can hit UNIQUE when two requests race. Those endpoints handle
+        # IntegrityError themselves; this is a fallback so it does not become 500.
         logger.warning("IntegrityError di %s: %s", request.url.path, exc)
         return JSONResponse(
             status_code=409,
@@ -99,8 +99,8 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_handler(request: Request, exc: Exception):
-        # Semua error tak terduga tetap memakai envelope error, bukan HTML
-        # 500 mentah yang membuat client gagal parse JSON.
+        # All unexpected errors still use the error envelope, not a raw HTML
+        # 500 that would make clients fail to parse JSON.
         logger.exception("Error tak tertangani di %s", request.url.path)
         return JSONResponse(
             status_code=500,
@@ -119,7 +119,7 @@ def create_app() -> FastAPI:
     app.include_router(tokens.router, prefix=API_PREFIX)
     app.include_router(dashboard_router, prefix=f"{API_PREFIX}/dashboard")
 
-    # Antarmuka web dashboard (statis; login dijaga oleh API di atas).
+    # Dashboard web interface (static; login is enforced by the API above).
     app.mount("/dashboard", StaticFiles(directory=str(STATIC_DIR), html=True), name="dashboard")
     return app
 

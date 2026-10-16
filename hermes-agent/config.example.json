@@ -1,6 +1,6 @@
 {
   "server_url": "http://127.0.0.1:8000/api/v1",
-  "registration_key": "isi-registration-key-dari-server",
+  "registration_key": "paste-registration-key-from-server",
   "agent_name": "hermes-alpha",
   "secret_key": "",
   "registration_nonce": "",

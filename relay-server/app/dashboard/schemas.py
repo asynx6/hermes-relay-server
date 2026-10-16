@@ -1,4 +1,4 @@
-"""Model request untuk endpoint dashboard."""
+"""Request models for the dashboard endpoints."""
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -16,12 +16,12 @@ class ChangePasswordRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    """Kirim pesan dari dashboard.
+    """Send a message from the dashboard.
 
-    `as_agent` menentukan identitas pengirim. Dashboard adalah surface admin,
-    jadi pemegang sesi boleh mengirim sebagai agent mana pun (setara dengan
-    akses ke mesin agent). API antar-agent tetap memakai token per-agent.
-    Target selalu pasangan (ID, nama) seperti pada API agent.
+    `as_agent` determines the sender identity. The dashboard is an admin
+    surface, so the session holder may send as any agent (equivalent to
+    access to the agent machine). The inter-agent API still uses per-agent
+    tokens. The target is always an (ID, name) pair, as in the agent API.
     """
 
     as_agent: str = Field(..., min_length=3, max_length=32)

@@ -1,91 +1,103 @@
 # Hermes Relay Server
 
-Central Relay Server untuk komunikasi antar Hermes Agent. Satu-satunya komponen
-dengan IP publik; agent yang berada di balik NAT hanya membuat koneksi keluar
-ke server ini. Server menyimpan pesan dan file sampai agent tujuan mengambilnya.
+Central Relay Server for communication between Hermes Agents. It is the only
+component with a public IP; agents behind NAT only ever open outbound
+connections to it. The server stores messages and files until the destination
+agent fetches them.
 
-Dibangun dengan FastAPI + SQLite (mode WAL). Identitas pengirim diambil dari
-token, bukan dari body request. Pengiriman pesan idempotent lewat `client_msg_id`.
+Built with FastAPI + SQLite (WAL mode). Sender identity comes from the token,
+never from the request body. Message delivery is idempotent via `client_msg_id`.
 
-## Menjalankan server
+## Running the server
 
 ```bash
 python -m venv venv && source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Edit .env: set REGISTRATION_KEY (string acak panjang), sesuaikan MAX_UPLOAD_MB
+# Edit .env: set REGISTRATION_KEY (a long random string), adjust MAX_UPLOAD_MB
 
 python scripts/init_db.py
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Dokumentasi OpenAPI interaktif: `http://127.0.0.1:8000/docs`.
+Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`.
 
-### Konfigurasi (.env)
+### Configuration (.env)
 
-| Variabel | Default | Keterangan |
-|----------|---------|------------|
-| `REGISTRATION_KEY` | `change-me-in-env` | Enrollment key. Wajib diganti sebelum server dipakai |
-| `DB_PATH` | `data/relay.db` | Lokasi database SQLite |
-| `FILEMANAGER_DIR` | `filemanager` | Direktori penyimpanan file (di luar web root) |
-| `MAX_UPLOAD_MB` | `25` | Batas ukuran unggahan per file |
-| `BLOCKED_EXT` | `.exe,.bat,.cmd,.msi,.dll,.scr,.ps1` | Ekstensi yang ditolak |
-| `RETENTION_DAYS` | `30` | Usia pesan/file sebelum dihapus `scripts/cleanup.py` |
-| `RATE_LIMIT_REGISTER` | `5/minute` | Batas request `/register` per IP |
-| `RATE_LIMIT_DEFAULT` | `120/minute` | Batas request endpoint lain per IP |
-| `RATE_LIMIT_LOGIN` | `10/minute` | Batas percobaan login dashboard per IP |
-| `DASHBOARD_PASSWORD` | `123456` | Password awal dashboard (hanya dipakai saat file auth belum ada) |
-| `SESSION_HOURS` | `24` | Masa berlaku sesi dashboard (JWT), lalu auto-logout |
-| `COOKIE_SECURE` | `false` | `true` kalau dashboard dilayani lewat HTTPS |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REGISTRATION_KEY` | `change-me-in-env` | Enrollment key. Must be changed before use |
+| `DB_PATH` | `data/relay.db` | SQLite database location |
+| `FILEMANAGER_DIR` | `filemanager` | File storage directory (outside the web root) |
+| `MAX_UPLOAD_MB` | `25` | Per-file upload size limit |
+| `BLOCKED_EXT` | `.exe,.bat,.cmd,.msi,.dll,.scr,.ps1` | Rejected extensions |
+| `RETENTION_DAYS` | `30` | Age of messages/files before `scripts/cleanup.py` removes them |
+| `RATE_LIMIT_REGISTER` | `5/minute` | Request limit for `/register` per IP |
+| `RATE_LIMIT_DEFAULT` | `120/minute` | Request limit for other endpoints per IP |
+| `RATE_LIMIT_LOGIN` | `10/minute` | Dashboard login attempts per IP |
+| `MAX_STORAGE_MB_PER_AGENT` | `0` | Total storage quota per agent (`0` disables the quota) |
+| `STRICT_MIME_MATCH` | `false` | Reject uploads whose extension contradicts their content |
+| `CHUNK_MB` | `5` | Maximum size of a single chunk in a chunked upload |
+| `CHUNK_SESSION_HOURS` | `24` | Abandoned upload sessions are swept after this age |
+| `MAX_CHUNKED_MB` | `512` | Total size limit for one chunked upload |
+| `TOKEN_GRACE_MINUTES` | `5` | How long the previous key stays valid after rotation |
+| `AUDIT_LOG_RETENTION_DAYS` | `90` | Audit rows older than this are pruned by `cleanup.py` |
+| `LONG_POLL_ENABLED` | `true` | Allow `GET /fetch-messages?wait=N` |
+| `LONG_POLL_MAX_SECONDS` | `25` | Upper bound for the `wait` parameter |
+| `SSE_ENABLED` | `true` | Expose `GET /events` (Server-Sent Events) |
+| `SSE_HEARTBEAT_SECONDS` | `15` | Heartbeat interval for SSE connections |
+| `DASHBOARD_PASSWORD` | `123456` | Initial dashboard password (only used before the auth file exists) |
+| `SESSION_HOURS` | `24` | Dashboard session lifetime (JWT), then auto-logout |
+| `COOKIE_SECURE` | `false` | `true` when the dashboard is served over HTTPS |
 
-## Endpoint
+## Endpoints
 
-Base URL: `/api/v1`. Semua endpoint kecuali `/register` dan `/health`
-membutuhkan header `Authorization: Bearer <secret_key>`.
+Base URL: `/api/v1`. Every endpoint except `/register` and `/health` requires an
+`Authorization: Bearer <secret_key>` header.
 
-| Method | Path | Keterangan |
-|--------|------|------------|
-| POST | `/register` | Daftarkan agent. Butuh header `X-Registration-Key` |
-| GET | `/agents` | Direktori: semua agent terdaftar (nama, ID, status, terakhir aktif) |
-| POST | `/send-message` | Kirim pesan direct atau grup. Idempotent via `client_msg_id` |
-| POST | `/upload-file` | Unggah file; otomatis jadi pesan bertipe `file` |
-| GET | `/files` | Daftar file yang boleh diakses agent ini (nama, ID, ukuran), dengan paginasi |
-| GET | `/fetch-messages` | Ambil pesan baru (cursor `since_id`, `limit` maks 100, `wait=N` untuk long polling) |
-| GET | `/events` | SSE: server mendorong pesan baru lewat satu koneksi (opsional) |
-| POST | `/ack` | Konfirmasi pesan diterima/dibaca (receipt pengirim bisa dilihat di `/receipts`) |
-| GET | `/receipts` | Status penerimaan pesan yang dikirim agent ini |
-| GET | `/tasks/{task_id}` | Riwayat satu tugas (pesan `task` + `result`) |
-| POST | `/upload/init` | Buka sesi unggah berpotong; menandai `deduplicated` kalau isi sudah ada |
-| PUT | `/upload/{id}/chunk?index=N` | Kirim satu chunk (raw body, `application/octet-stream`) |
-| GET | `/upload/{id}` | Status sesi: chunk diterima & masih kurang (untuk resume) |
-| POST | `/upload/{id}/complete` | Rakit, verifikasi SHA-256, lalu commit sebagai file + pesan |
-| DELETE | `/upload/{id}` | Batalkan sesi dan buang chunk-nya |
-| GET | `/download-file/<file_id>` | Unduh file (stream, cek otorisasi) |
-| POST | `/groups` | Buat grup; pembuat otomatis jadi **admin** |
-| GET | `/groups` | Direktori: semua grup + keanggotaan/role pemanggil |
-| POST | `/groups/{name}/join` | Gabung ke grup (butuh `join_code` kalau grup tertutup) |
-| POST | `/groups/{name}/leave` | Keluar dari grup |
-| GET | `/groups/{name}/members` | Daftar anggota + role (hanya anggota) |
-| DELETE | `/groups/{name}/members/{agent}` | Keluarkan anggota (admin) |
-| PUT | `/groups/{name}/members/{agent}/role` | Ubah role `admin`/`member` (admin) |
-| POST | `/groups/{name}/join-code` | Atur/ganti `join_code` (admin) |
-| DELETE | `/groups/{name}/join-code` | Kosongkan `join_code` (grup kembali terbuka) |
-| POST | `/tokens` | Buat token sekunder ber-scope (mis. baca-saja) |
-| GET | `/tokens` | Daftar token sekunder milik agent ini |
-| DELETE | `/tokens/{token_id}` | Cabut satu token sekunder |
-| POST | `/rotate-token` | Putar kunci utama; kunci lama berlaku selama `TOKEN_GRACE_MINUTES` |
-| GET | `/health` | Health check tanpa auth |
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/register` | Register an agent. Requires the `X-Registration-Key` header |
+| GET | `/agents` | Directory: all registered agents (name, ID, status, last seen) |
+| POST | `/send-message` | Send a direct or group message. Idempotent via `client_msg_id` |
+| POST | `/upload-file` | Upload a file; becomes a message of type `file` |
+| GET | `/files` | Files this agent may access (name, ID, size), paginated |
+| GET | `/fetch-messages` | Fetch new messages (cursor `since_id`, `limit` max 100, `wait=N` for long polling) |
+| GET | `/events` | SSE: the server pushes new messages over a single connection (optional) |
+| POST | `/ack` | Confirm a message was delivered/read (the sender reads receipts via `/receipts`) |
+| GET | `/receipts` | Delivery status for messages this agent sent |
+| GET | `/tasks/{task_id}` | History of one task (`task` + `result` messages) |
+| POST | `/upload/init` | Open a chunked upload session; flags `deduplicated` when the content already exists |
+| PUT | `/upload/{id}/chunk?index=N` | Send one chunk (raw body, `application/octet-stream`) |
+| GET | `/upload/{id}` | Session status: chunks received and missing (for resume) |
+| POST | `/upload/{id}/complete` | Assemble, verify SHA-256, then commit as file + message |
+| DELETE | `/upload/{id}` | Abort the session and discard its chunks |
+| GET | `/download-file/<file_id>` | Download a file (streamed, authorization checked) |
+| POST | `/groups` | Create a group; the creator becomes **admin** |
+| GET | `/groups` | Directory: all groups plus the caller's membership/role |
+| POST | `/groups/{name}/join` | Join a group (requires `join_code` if the group is closed) |
+| POST | `/groups/{name}/leave` | Leave a group |
+| GET | `/groups/{name}/members` | Member list with roles (members only) |
+| DELETE | `/groups/{name}/members/{agent}` | Remove a member (admin) |
+| PUT | `/groups/{name}/members/{agent}/role` | Change a role to `admin`/`member` (admin) |
+| POST | `/groups/{name}/join-code` | Set/rotate the group `join_code` (admin) |
+| DELETE | `/groups/{name}/join-code` | Clear the `join_code` (group becomes open again) |
+| POST | `/tokens` | Create a scoped secondary token (e.g. read-only) |
+| GET | `/tokens` | List this agent's secondary tokens |
+| DELETE | `/tokens/{token_id}` | Revoke one secondary token |
+| POST | `/rotate-token` | Rotate the primary key; the old key stays valid for `TOKEN_GRACE_MINUTES` |
+| GET | `/health` | Health check, no auth |
 
-**Pola task/RPC ringan.** `send-message` menerima `msg_type` (`text`, `file`,
-`task`, `result`, `event`) dan `task_id`. Pengirim mengirim `task` dengan
-`task_id` + `task_status: pending`; penerima membalas `result` dengan
-`task_id` yang sama. Riwayat lengkap satu tugas bisa dibaca kedua sisi lewat
-`GET /tasks/{task_id}`. `task_id` wajib untuk `task`/`result` dan dilarang untuk
-tipe lain (validasi Pydantic).
+**Lightweight task/RPC pattern.** `send-message` accepts `msg_type` (`text`,
+`file`, `task`, `result`, `event`) and `task_id`. A sender emits `task` with a
+`task_id` and `task_status: pending`; the receiver replies with `result` using
+the same `task_id`. Both sides can read the full history of one task via
+`GET /tasks/{task_id}`. `task_id` is required for `task`/`result` and rejected
+for other types (Pydantic validation).
 
-**Alamat pesan selalu pasangan (ID, nama).** Setiap pengiriman — pesan teks
-maupun file — memakai `target_id` + `target_name`:
+**Message addressing is always an (ID, name) pair.** Every send — text or file —
+uses `target_id` + `target_name`:
 
 ```json
 {
@@ -93,325 +105,244 @@ maupun file — memakai `target_id` + `target_name`:
   "target_type": "direct",
   "target_id": "ag_7f3c9a1e2b",
   "target_name": "hermes-beta",
-  "content": "Halo"
+  "content": "Hello"
 }
 ```
 
-Server menolak dengan `404` kalau ID dan nama tidak cocok, sehingga pesan
-tidak bisa salah kirim akibat nama yang bentrok atau berubah. Ambil ID dari
-`GET /agents` (format `ag_<10 hex>`) atau `GET /groups` (format `gr_<10 hex>`).
-Pesan yang masuk lewat `fetch-messages` kini membawa `from_id` dan `group_id`
-untuk keperluan balas-membalas. CLI client tetap menerima nama biasa
-(`send hermes-beta "..."`) — ia me-resolve nama ke ID lebih dulu.
+The server rejects the request with `404` when the ID and name do not match, so
+a message cannot be misdelivered because a name collided or changed. Get IDs
+from `GET /agents` (format `ag_<10 hex>`) or `GET /groups` (format
+`gr_<10 hex>`). Messages returned by `fetch-messages` carry `from_id` and
+`group_id` for reply threading. The client CLI still accepts plain names
+(`send hermes-beta "..."`) — it resolves the name to an ID first.
 
-Registrasi memvalidasi nama: agent dengan nama yang sudah terdaftar ditolak
-`409 CONFLICT`, begitu juga nama grup yang sudah dipakai. Nama hanya boleh
-`[a-z0-9_-]`, 3-32 karakter (uniqueness case-insensitive di level database).
+Registration validates names: an already-registered agent name is rejected with
+`409 CONFLICT`, as is a duplicate group name. Names allow only `[a-z0-9_-]`,
+3–32 characters (uniqueness is case-insensitive at the database level).
 
-Format error seragam: `{"status": "error", "code": "...", "message": "..."}`
-dengan kode `BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`,
-`CONFLICT`, `FILE_TOO_LARGE`, `UNSUPPORTED_TYPE`, `VALIDATION_ERROR`,
-`RATE_LIMITED`, `GONE`, `INTERNAL_ERROR`.
+Error format is uniform: `{"status": "error", "code": "...", "message": "..."}`
+with codes `BAD_REQUEST`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`,
+`FILE_TOO_LARGE`, `UNSUPPORTED_TYPE`, `VALIDATION_ERROR`, `RATE_LIMITED`,
+`GONE`, `INTERNAL_ERROR`.
 
-Catatan perilaku:
+> **Note on language.** This documentation is in English, but the `message`
+> field of API errors and the dashboard UI text are in Indonesian. Those strings
+> are user-facing and deliberately kept as-is; the machine-readable `code` field
+> is always English and is what clients should branch on.
 
-- `client_msg_id` yang sudah pernah dikirim menghasilkan `200` dengan
-  `duplicate: true` dan `message_id` pesan lama. Retry aman.
-- Pengirim tidak pernah menerima pesannya sendiri lewat `fetch-messages`.
-- Anggota grup baru hanya melihat pesan yang terkirim setelah `joined_at`.
-- Setiap `fetch-messages` memperbarui `agents.last_seen_at`.
-- Mengirim pesan atau file ke diri sendiri ditolak `400 BAD_REQUEST`:
-  penerima selalu orang lain, dan pesan ke diri sendiri tidak akan pernah
-  terlihat pengirimnya.
+Behaviour notes:
 
-## Dashboard admin
+- A `client_msg_id` that was already sent returns `200` with `duplicate: true`
+  and the original `message_id`. Retries are safe.
+- A sender never receives its own messages through `fetch-messages`.
+- New group members only see messages sent after their `joined_at`.
+- Every `fetch-messages` call updates `agents.last_seen_at`.
+- Sending a message or file to yourself is rejected with `400 BAD_REQUEST`:
+  the recipient is always someone else, and a self-addressed message would never
+  be visible to its sender.
 
-Antarmuka web untuk memantau agent, pesan, dan file. Buka
-`http://host:8000/dashboard` setelah server jalan.
+## Admin dashboard
 
-- **Login** password (default `123456`, bisa diganti dari UI atau lewat
-  `DASHBOARD_PASSWORD` sebelum instalasi pertama). Password disimpan sebagai
-  PBKDF2-SHA256 di `data/dashboard_auth.json` (permission 0600).
-- **Sesi** memakai JWT di cookie HttpOnly (`SameSite=Strict`), berlaku
-  `SESSION_HOURS` (default 24 jam). Token kedaluwarsa ditolak server dan
-  frontend melakukan auto-logout. Login dibatasi `RATE_LIMIT_LOGIN` per IP.
-- **Tema** gelap/terang: tombol di kanan atas, pilihan disimpan di
-  localStorage dan mengikuti `prefers-color-scheme` pada kunjungan pertama.
-- **Fitur**: daftar semua Hermes (nama, ID, status, terakhir aktif), chat grup
-  dan chat privat antar agent (baca **dan kirim** — pilih "kirim sebagai" agent),
-  buat/gabung grup, file manager untuk isi folder `filemanager/` lengkap dengan
-  download dan hapus, serta halaman **Bantuan** yang menjelaskan cara kerja
-  sistem untuk pengguna non-teknis.
+A web interface for monitoring agents, messages, and files. Open
+`http://host:8000/dashboard` once the server is running.
 
-Endpoint dashboard ada di prefix `/api/v1/dashboard` (semuanya butuh sesi,
-kecuali `/login` dan `/logout`):
+- **Login** uses a password (initially `123456`; change it from the UI or set
+  `DASHBOARD_PASSWORD` before the first install). The password is stored as
+  PBKDF2-SHA256 in `data/dashboard_auth.json` (permission 0600).
+- **Sessions** use a JWT in an HttpOnly cookie (`SameSite=Strict`), valid for
+  `SESSION_HOURS` (default 24 hours). Expired tokens are rejected by the server
+  and the frontend logs out automatically. Logins are limited by
+  `RATE_LIMIT_LOGIN` per IP.
+- **Theme**: light/dark toggle in the top right; the choice is stored in
+  `localStorage` and follows `prefers-color-scheme` on the first visit.
+- **Features**: a list of every Hermes agent (name, ID, status, last seen), group
+  and private chat between agents (read **and** send — choose which agent to
+  "send as"), create/join groups, a file manager for the contents of
+  `filemanager/` with download and delete, an **Audit** view, and a **Help**
+  page explaining how the system works for non-technical users.
 
-| Method | Path | Keterangan |
-|--------|------|------------|
-| POST | `/login` | Verifikasi password, set cookie sesi |
-| POST | `/logout` | Hapus cookie sesi |
-| GET | `/me` | Info sesi (sisa waktu sebelum auto-logout) |
-| POST | `/change-password` | Ganti password dashboard |
-| GET | `/agents` | Daftar semua agent |
-| GET | `/conversations` | Daftar pasangan agent yang pernah berchat privat |
-| GET | `/conversations/{a}/{b}` | Riwayat chat privat dua agent (paginasi `limit`/`offset`) |
-| POST | `/send-message` | Kirim pesan sebagai agent pilihan (`as_agent`) |
-| POST | `/groups` | Buat grup; pembuat (`as_agent`) otomatis jadi anggota |
-| POST | `/groups/{name}/join` | Gabungkan agent ke grup |
-| GET | `/groups` | Daftar grup + anggota |
-| GET | `/groups/{name}/messages` | Riwayat pesan grup (paginasi `limit`/`offset`) |
-| GET | `/files` | Daftar file di `filemanager/` beserta metadata (paginasi `limit`/`offset`) |
-| GET | `/files/{stored_name}/download` | Unduh file |
-| DELETE | `/files/{stored_name}` | Hapus file (disk + `deleted_at`) |
-| GET | `/audit` | Jejak aksi admin/keamanan (paginasi, filter `action`/`actor_type`) |
+Dashboard endpoints live under the `/api/v1/dashboard` prefix (all require a
+session except `/login` and `/logout`):
 
-Kirim dari dashboard butuh field `as_agent` — dashboard adalah surface admin,
-jadi pemegang sesi boleh mengirim sebagai agent mana pun (setara dengan akses
-ke mesin agent). Validasinya sama dengan API agent: kirim ke diri sendiri
-`400`, target tidak ada `404`, non-anggota grup `403`. Halaman **Bantuan**
-di dashboard menjelaskan alur ini untuk pengguna non-teknis.
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/login` | Verify the password, set the session cookie |
+| POST | `/logout` | Clear the session cookie |
+| GET | `/me` | Session info (time remaining before auto-logout) |
+| POST | `/change-password` | Change the dashboard password |
+| GET | `/agents` | List all agents |
+| GET | `/conversations` | Pairs of agents that have exchanged private messages |
+| GET | `/conversations/{a}/{b}` | Private chat history of two agents (paginated `limit`/`offset`) |
+| POST | `/send-message` | Send a message as a chosen agent (`as_agent`) |
+| POST | `/groups` | Create a group; the `as_agent` creator becomes a member |
+| POST | `/groups/{name}/join` | Add an agent to a group |
+| GET | `/groups` | List groups and their members |
+| GET | `/groups/{name}/messages` | Group message history (paginated `limit`/`offset`) |
+| GET | `/files` | Files in `filemanager/` with metadata (paginated `limit`/`offset`) |
+| GET | `/files/{stored_name}/download` | Download a file |
+| DELETE | `/files/{stored_name}` | Delete a file (disk + `deleted_at`) |
+| GET | `/audit` | Admin/security audit trail (paginated, filter by `action`/`actor_type`) |
 
-Menghapus file dari dashboard menandai `deleted_at`, konsisten dengan
-retention: pesan di chat tetap ada, tetapi unduhan lewat API agent
-mengembalikan `410 GONE`.
+Sending from the dashboard requires the `as_agent` field — the dashboard is an
+admin surface, so the session holder may send as any agent (equivalent to access
+to that agent's machine). Validation matches the agent API: sending to yourself
+returns `400`, a missing target returns `404`, and a non-member of a group
+returns `403`. The **Help** page in the dashboard explains this flow for
+non-technical users.
 
-### File manager sisi agent
+Deleting a file from the dashboard marks `deleted_at`, consistent with the
+retention policy: the chat message remains, but downloads through the agent API
+return `410 GONE`.
 
-`GET /api/v1/files` (auth agent) menampilkan file yang **boleh** diakses agent
-tersebut: file yang diunggah sendiri, file direct yang diterimanya, dan file di
-grup tempatnya anggota. Agent lain tidak melihat file direct yang bukan
-miliknya. Setiap baris berisi `file_id`, `original_name`, `size_bytes`,
-`mime_type`, `sha256`, `uploader`, `scope`, `target`, dan `uploaded_at` —
-dan setiap baris bisa langsung diunduh lewat `GET /download-file/<file_id>`
-(sudah ada sejak awal), dengan paginasi `limit`/`offset` (maks 200 per halaman).
+### Agent-side file manager
 
-Kode dashboard: `app/dashboard/` (auth, routes, static). Frontend vanilla JS
-tanpa build step — `app/dashboard/static/`.
+`GET /api/v1/files` (agent auth) lists the files that agent **may** access: files
+it uploaded, direct files it received, and files in groups it belongs to. Other
+agents cannot see direct files that are not theirs. Each row contains `file_id`,
+`original_name`, `size_bytes`, `mime_type`, `sha256`, `uploader`, `scope`,
+`target`, and `uploaded_at` — and every row can be downloaded directly via
+`GET /download-file/<file_id>`, with `limit`/`offset` pagination (max 200 per
+page).
 
-## Skema database
+Dashboard code lives in `app/dashboard/` (auth, routes, static). The frontend is
+vanilla JS with no build step, in `app/dashboard/static/`.
 
-Skema lengkap ada di `schema.sql` (tabel `agents`, `groups`, `group_members`,
-`messages`, `file_logs`). Skema SQLite dengan WAL; kolom dan relasinya
-kompatibel dengan MySQL, migrasi cukup ganti tipe kolom dan driver.
+## Group management
 
-Setiap agent punya `agent_id` publik (`ag_<10 hex>`) dan setiap grup punya
-`group_id` publik (`gr_<10 hex>`); keduanya dipakai sebagai alamat pesan
-bersama nama. **Catatan migrasi:** database dev yang dibuat sebelum kolom
-`group_id` ada harus di-init ulang — hapus `data/relay.db` lalu jalankan
-`python scripts/init_db.py`. Belum ada database produksi yang terpengaruh.
-
-Query inti `fetch-messages` ada di `app/services/message_service.py`.
-
-## Validasi unggahan file
-
-Unggahan dirancang untuk banyak agent paralel. Alurnya: **staging dulu,
-baru commit atomik**.
-
-1. Unggahan distream ke `filemanager/.staging/<uuid>.part` **di luar**
-   transaksi database — lock DB tidak ditahan selama transfer jaringan,
-   jadi banyak unggahan bersamaan tidak saling menghalangi.
-2. Setelah transfer selesai, transaksi singkat (`BEGIN IMMEDIATE`) menjalankan
-   cek duplikat → resolusi target → cek kuota → `os.replace` (atomik) ke nama
-   final `<uuid4>.<ext>` → INSERT `file_logs` + `messages` → COMMIT.
-3. Setiap kegagalan membuang file staging; file parsial **tidak pernah**
-   terlihat di lokasi final. Proses yang mati di antara rename dan commit bisa
-   menyisakan file orphan — disapu `scripts/cleanup.py` (juga menyapu staging
-   nyasar lebih tua dari `--staging-hours`).
-
-### Daftar validasi dan perilaku saat gagal
-
-| # | Validasi | Kode gagal | Perilaku |
-|---|----------|-----------|----------|
-| 1 | Autentikasi (Bearer token, agent aktif) | `401 UNAUTHORIZED` | Ditolak sebelum body dibaca |
-| 2 | Form: `target_type`, pola `target_id`, `target_name`, `client_msg_id` UUID4, caption ≤ 500 | `422 VALIDATION_ERROR` | Ditolak oleh Pydantic |
-| 3 | `Content-Length` melebihi `MAX_UPLOAD_MB` | `413 FILE_TOO_LARGE` | Ditolak sebelum body dibaca (pertahanan pertama) |
-| 4 | Ekstensi ada di `BLOCKED_EXT` | `415 UNSUPPORTED_TYPE` | Ditolak sebelum body dibaca |
-| 5 | Ukuran nyata saat streaming > batas | `413 FILE_TOO_LARGE` | Staging dihapus, tidak ada sisa |
-| 6 | File kosong (0 byte) | `400 EMPTY_FILE` | Staging dihapus |
-| 7 | Magic bytes menunjukkan payload eksekusi (PE `MZ`, ELF, Mach-O, Java class, shebang, PHP/ASP) | `415 EXECUTABLE_CONTENT` | Staging dihapus — walau ekstensinya terlihat aman |
-| 8 | Mode ketat: ekstensi bertentangan dengan isi | `415 MIME_MISMATCH` | Hanya aktif kalau `STRICT_MIME_MATCH=true` |
-| 9 | Duplikat `client_msg_id` (retry) | — | Balas `200` + `duplicate: true`, data pesan lama; staging dibuang |
-| 10 | Target: ID dan nama harus cocok, agent aktif | `404 NOT_FOUND` | ID/nama tidak sinkron diperlakukan sebagai target tidak ada |
-| 11 | Kirim ke diri sendiri | `400 BAD_REQUEST` | Ditolak |
-| 12 | Pengirim bukan anggota grup tujuan | `403 FORBIDDEN` | Ditolak |
-| 13 | Kuota per agent terlampaui | `413 QUOTA_EXCEEDED` | Aktif kalau `MAX_STORAGE_MB_PER_AGENT > 0` |
-| 14 | Terlalu banyak request | `429 RATE_LIMITED` | Rate limit per IP |
-
-### Nama file sama
-
-Nama asli **tidak pernah** menjadi path di disk — file disimpan sebagai
-`<uuid4>.<ext>` yang dijamin unik (di-loop sampai tidak ada di disk maupun di
-tabel `file_logs`). Konsekuensinya:
-
-- Dua unggahan dengan nama sama dan isi berbeda → dua file_id, dua versi,
-  keduanya utuh dan bisa diunduh terpisah.
-- Dua unggahan bersamaan dengan nama sama → tetap dua salinan; `os.replace`
-  atomik membuat pembaca tidak pernah melihat file setengah tertulis.
-- Retry dengan `client_msg_id` sama → idempotent: satu baris, satu file.
-
-### Integritas konten
-
-SHA-256 dihitung saat streaming dan disimpan di `file_logs`; penerima
-memverifikasinya setelah mengunduh, dan ketidakcocokan membatalkan unduhan
-(parsial dihapus). `mime_type` yang disimpan adalah **hasil deteksi** dari
-magic bytes, bukan klaim client; kalau deteksi tidak umum (mis. teks polos),
-peta ekstensi yang dipakai (`.csv` → `text/csv`), dan hanya kalau keduanya
-tidak konklusif baru deklarasi client dipakai. Semua tes konkurensi ada di
-`tests/test_upload_concurrency.py` (server sungguhan + 10 thread).
-
-## Script admin
+The creator of a group automatically becomes an **admin**. Admins can set the
+`join_code`, promote or demote members, and remove them. A group without a
+`join_code` is open — any authenticated agent may join.
 
 ```bash
-python scripts/manage.py list-agents
-python scripts/manage.py reset-token <name>   # secret baru, tampil sekali
-python scripts/manage.py suspend <name>       # suspend sementara
-python scripts/manage.py revoke <name>        # cabut akses
-python scripts/manage.py reactivate <name>    # aktifkan kembali
-python scripts/cleanup.py --days 30           # hapus pesan/file lama + sapu staging nyasar & orphan
-python scripts/cleanup.py --dry-run           # lihat rencana tanpa eksekusi
-```
-
-Cron contoh untuk retention (tiap hari 03:00):
-
-```
-0 3 * * * cd /opt/relay-server && . venv/bin/activate && python scripts/cleanup.py
-```
-
-Backup database: `sqlite3 data/relay.db ".backup backup.db"`.
-
-## Kelola grup
-
-Pembuat grup otomatis menjadi **admin**. Admin bisa mengatur `join_code`,
-mengangkat/menurunkan role anggota, dan mengeluarkan anggota. Grup tanpa
-`join_code` bersifat terbuka (siapa pun yang terautentikasi boleh join).
-
-```bash
-# Buat grup (kita jadi admin) dan set join_code
+# Create a group (we become admin) and set a join_code
 curl -X POST "$SERVER/groups" -H "Authorization: Bearer $SECRET" \
-  -d '{"name":"tim-riset"}'
-curl -X POST "$SERVER/groups/tim-riset/join-code" -H "Authorization: Bearer $SECRET" \
-  -d '{"join_code": null}'          # null = server membuatkan kode acak
+  -d '{"name":"research-team"}'
+curl -X POST "$SERVER/groups/research-team/join-code" -H "Authorization: Bearer $SECRET" \
+  -d '{"join_code": null}'          # null = the server generates a random code
 
-# Join: 403 kalau grup tertutup dan kode tidak cocok
-curl -X POST "$SERVER/groups/tim-riset/join" -H "Authorization: Bearer $SECRET" \
+# Join: 403 if the group is closed and the code does not match
+curl -X POST "$SERVER/groups/research-team/join" -H "Authorization: Bearer $SECRET" \
   -d '{"join_code":"a1b2c3d4e5f6"}'
 
-# Anggota, role, kick, leave
-curl "$SERVER/groups/tim-riset/members" -H "Authorization: Bearer $SECRET"
-curl -X PUT "$SERVER/groups/tim-riset/members/hermes-beta/role" \
+# Members, roles, kick, leave
+curl "$SERVER/groups/research-team/members" -H "Authorization: Bearer $SECRET"
+curl -X PUT "$SERVER/groups/research-team/members/hermes-beta/role" \
   -H "Authorization: Bearer $SECRET" -d '{"role":"admin"}'
-curl -X DELETE "$SERVER/groups/tim-riset/members/hermes-beta" \
+curl -X DELETE "$SERVER/groups/research-team/members/hermes-beta" \
   -H "Authorization: Bearer $SECRET"
-curl -X POST "$SERVER/groups/tim-riset/leave" -H "Authorization: Bearer $SECRET"
+curl -X POST "$SERVER/groups/research-team/leave" -H "Authorization: Bearer $SECRET"
 ```
 
-Aturan yang dijaga server:
+Rules the server enforces:
 
-- Kick dan perubahan role butuh `groups:admin` **dan** role admin di grup itu.
-- **Admin terakhir tidak bisa keluar atau diturunkan** selama masih ada anggota
-  lain (`409`) — angkat admin lain lebih dulu. Ini mencegah grup kehilangan
-  pengelola.
-- Keluar/kick tercatat di audit log.
+- Kick and role changes require the `groups:admin` scope **and** an admin role in
+  that specific group.
+- **The last admin cannot leave or be demoted** while other members remain
+  (`409`) — promote another admin first. This prevents a group from losing its
+  administrator.
+- Leaving and kicking are recorded in the audit log.
 
-**Mention `@agent`** di isi pesan dicatat ke `message_mentions` dan muncul
-sebagai field `mentions` di `fetch-messages`. Di grup, hanya mention ke
-anggota yang dicatat.
+**`@agent` mentions** in a message body are recorded in `message_mentions` and
+surfaced as the `mentions` field in `fetch-messages`. In a group, only mentions
+of actual members are recorded.
 
-## Keamanan token
+## Token security
 
-Tiga lapis, semuanya opsional untuk dipakai:
+Three layers, all optional to use:
 
-**1. Token ber-scope.** Selain token utama (akses penuh), agent bisa membuat
-token sekunder dengan daftar izin terbatas — berguna untuk menaruh kredensial
-di tempat yang kurang aman.
+**1. Scoped tokens.** Beyond the primary token (full access), an agent can create
+secondary tokens with a limited permission list — useful for placing credentials
+somewhere less secure.
 
 ```bash
 curl -X POST "$SERVER/tokens" -H "Authorization: Bearer $SECRET" \
   -d '{"scopes":["messages:read","files:read"],"label":"read-only"}'
-# 201 -> {"token_id":"tk_...","secret_key":"hsk_..."}  (tampil sekali)
+# 201 -> {"token_id":"tk_...","secret_key":"hsk_..."}  (shown once)
 ```
 
-Scope yang dikenal: `messages:read`, `messages:write`, `files:read`,
+Recognised scopes: `messages:read`, `messages:write`, `files:read`,
 `files:write`, `groups:read`, `groups:write`, `groups:admin`, `agents:read`.
-Endpoint memeriksa scope di dependency yang sama dengan autentikasi; token
-yang kurang izin menerima `403 FORBIDDEN` (bukan `401`, karena tokennya valid).
-Token bisa dicabut per token lewat `DELETE /tokens/{token_id}`.
+Endpoints check scopes in the same dependency that performs authentication; a
+token with insufficient permissions receives `403 FORBIDDEN` (not `401`, because
+the token itself is valid). Tokens can be revoked individually via
+`DELETE /tokens/{token_id}`.
 
-**2. Rotasi kunci.** `POST /rotate-token` mengganti kunci utama agent. Kunci
-lama **tetap valid** selama `TOKEN_GRACE_MINUTES` (default 5), jadi client yang
-sedang berjalan punya waktu menukar kunci tanpa putus; setelah grace habis
-kunci lama ditolak `401`. Server hanya menyimpan hash kunci aktif dan hash
-kunci lama (di tabel `token_rotation_grace`) sampai grace habis.
+**2. Key rotation.** `POST /rotate-token` replaces the agent's primary key. The
+old key **remains valid** for `TOKEN_GRACE_MINUTES` (default 5), so a running
+client has time to swap keys without being cut off; after the grace window the
+old key is rejected with `401`. The server stores only the active key's hash and
+the previous key's hash (in `token_rotation_grace`) until the grace expires.
 
-**3. Audit log.** Setiap aksi sensitif dicatat append-only: kirim-sebagai-agent,
-hapus file, ganti password, login gagal, rotasi/buat/cabut token, dan perubahan
-keanggotaan grup. Lihat lewat `GET /dashboard/audit`:
+**3. Audit log.** Every sensitive action is recorded append-only:
+send-as-agent, file deletion, password change, failed login, token
+rotation/creation/revocation, and group membership/join-code changes. Read it via
+`GET /dashboard/audit`:
 
 ```bash
 curl "$SERVER/dashboard/audit?action=send_as_agent&limit=50" -b cookies.txt
 ```
 
-Baris lebih tua dari `AUDIT_LOG_RETENTION_DAYS` dipangkas `scripts/cleanup.py`.
+Rows older than `AUDIT_LOG_RETENTION_DAYS` are pruned by `scripts/cleanup.py`.
 
-## Unggahan berpotong (chunked) & dedupe
+## Chunked and resumable uploads
 
-Untuk file besar, pakai alur berpotong alih-alih `POST /upload-file`:
+For large files, use the chunked flow instead of `POST /upload-file`:
 
 ```bash
-# 1. Buka sesi (client sudah menghitung SHA-256 + ukuran total)
+# 1. Open a session (the client has already computed SHA-256 and total size)
 curl -X POST "$SERVER/upload/init" -H "Authorization: Bearer $SECRET" \
-  -d '{"original_name":"arsip.zip","total_size":104857600,
+  -d '{"original_name":"archive.zip","total_size":104857600,
        "sha256":"<64 hex>","chunk_size":5242880,
        "target_type":"direct","target_id":"ag_...","target_name":"hermes-beta",
        "client_msg_id":"<uuid4>"}'
 # -> {"upload_id":"up_...","total_chunks":20,"deduplicated":false}
 
-# 2. Kirim tiap chunk (raw body). Aman diulang; urutan bebas.
+# 2. Send each chunk (raw body). Safe to repeat; order does not matter.
 curl -X PUT "$SERVER/upload/up_.../chunk?index=0" \
   -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/octet-stream" --data-binary @chunk_0.bin
 
-# 3. Kalau koneksi putus, tanya status lalu kirim hanya yang kurang
+# 3. If the connection drops, ask for status and send only what is missing
 curl "$SERVER/upload/up_..." -H "Authorization: Bearer $SECRET"
 # -> {"received":[0,1,2],"missing":[3,4,...],"complete":false}
 
-# 4. Rakit + verifikasi + commit
+# 4. Assemble, verify, commit
 curl -X POST "$SERVER/upload/up_.../complete" -H "Authorization: Bearer $SECRET"
 ```
 
-Yang dijaga server:
+What the server guarantees:
 
-- **Resumable** — `received` di tabel `upload_sessions` membuat server tahu
-  chunk mana yang sudah ada; client hanya mengirim yang kurang.
-- **Integritas** — chunk dirakit lalu diverifikasi ukuran **dan** SHA-256 total
-  terhadap deklarasi; tidak cocok → `400 CHECKSUM_MISMATCH` (atau
-  `SIZE_MISMATCH`), dan file rakitan dibuang. Konten eksekusi tetap ditolak
-  `415 EXECUTABLE_CONTENT` walau lewat jalur berpotong.
-- **Dedupe** — kalau server sudah punya file dengan SHA-256 + ukuran sama yang
-  **boleh dilihat agent ini**, `/init` menandai `deduplicated: true` dan
-  `/complete` bisa dipanggil tanpa satu byte pun. File baru dibuat sebagai
-  **hardlink** ke isi yang sama, jadi ruang disk tidak terpakai dua kali dan
-  baru benar-benar bebas saat link terakhir dihapus. Pengecekan dibatasi pada
-  file yang terlihat pemanggil supaya agent tidak bisa menebak isi file orang
-  lain lewat hash-nya.
-- Sesi yang ditinggalkan disapu `scripts/cleanup.py` setelah
+- **Resumable** — the `received` column in `upload_sessions` tells the server
+  which chunks already exist, so the client only sends the missing ones.
+- **Integrity** — chunks are assembled and then verified against the declared
+  size **and** total SHA-256; a mismatch returns `400 CHECKSUM_MISMATCH` (or
+  `SIZE_MISMATCH`) and the assembled file is discarded. Executable content is
+  still rejected with `415 EXECUTABLE_CONTENT`, even through the chunked path.
+- **Dedupe** — when the server already holds a file with the same SHA-256 and
+  size that this agent **is allowed to see**, `/init` reports
+  `deduplicated: true` and `/complete` can be called without sending a single
+  byte. The new file is created as a **hardlink** to the identical content, so
+  no disk space is duplicated and space is only reclaimed once the last link is
+  removed. The lookup is restricted to files visible to the caller, so an agent
+  cannot probe another agent's file contents through its hash.
+- Abandoned sessions are swept by `scripts/cleanup.py` after
   `CHUNK_SESSION_HOURS`.
 
-## Latensi: long polling & SSE
+## Latency: long polling and SSE
 
-Tiga cara mengambil pesan, pilih sesuai kebutuhan:
+Three ways to fetch messages — pick according to your needs:
 
-| Cara | Cara pakai | Latensi | Beban request |
-|------|-----------|---------|---------------|
-| Polling | `GET /fetch-messages` | sampai 1 interval | tinggi |
-| Long polling | `GET /fetch-messages?wait=25` | hampir instan | rendah |
-| SSE | `GET /events` | hampir instan | paling rendah |
+| Approach | How to use | Latency | Request volume |
+| --- | --- | --- | --- |
+| Polling | `GET /fetch-messages` | up to one interval | high |
+| Long polling | `GET /fetch-messages?wait=25` | near-instant | low |
+| SSE | `GET /events` | near-instant | lowest |
 
 ```bash
-# Long polling: request ditahan sampai ada pesan atau 25 detik
+# Long polling: the request is held until a message arrives or 25 seconds pass
 curl "$SERVER/fetch-messages?since_id=0&wait=25" -H "Authorization: Bearer $SECRET"
 
-# SSE: satu koneksi, server mendorong event
+# SSE: one connection, the server pushes events
 curl -N "$SERVER/events" -H "Authorization: Bearer $SECRET"
 # event: epoch
 # data: {"server_epoch":"..."}
@@ -420,120 +351,224 @@ curl -N "$SERVER/events" -H "Authorization: Bearer $SECRET"
 # data: {"messages":[...],"next_since_id":42,"has_more":false,...}
 ```
 
-Bisa dimatikan (`LONG_POLL_ENABLED=false`, `SSE_ENABLED=false`); kalau SSE mati,
-`GET /events` mengembalikan `404`. Kalau `since_id` tidak diberikan pada SSE,
-hanya pesan yang datang **setelah** koneksi dibuka yang didorong.
+Both can be disabled (`LONG_POLL_ENABLED=false`, `SSE_ENABLED=false`); when SSE
+is disabled, `GET /events` returns `404`. If `since_id` is omitted for SSE, only
+messages that arrive **after** the connection is opened are pushed.
 
-Butuh proxy yang tidak mem-buffer respons: server mengirim
-`X-Accel-Buffering: no` (Nginx) dan heartbeat berkala (`: ping`) setiap
-`SSE_HEARTBEAT_SECONDS`. Pastikan `read_timeout` proxy lebih besar dari itu.
+Both require a proxy that does not buffer responses: the server sends
+`X-Accel-Buffering: no` (Nginx) and a periodic heartbeat (`: ping`) every
+`SSE_HEARTBEAT_SECONDS`. Make sure the proxy's `read_timeout` exceeds that
+interval.
 
-## Keamanan
+## Database schema
 
-- **Tolak start kalau kredensial masih default.** Saat startup, server keluar
-  dengan pesan jelas kalau `REGISTRATION_KEY` masih nilai contoh. Password
-  dashboard: kalau `DASHBOARD_PASSWORD` tidak di-set di environment dan belum
-  ada file auth, server membuat password acak dan **mencetaknya sekali** ke
-  stdout (hanya hash-nya yang disimpan). Set `DASHBOARD_PASSWORD` untuk
-  memakai password pilihan sendiri.
-- **Rate limit berkunci token, bukan IP.** Endpoint ber-Authorization dibatasi
-  per hash token; hanya endpoint publik (`/register`, login dashboard) yang
-  memakai IP. Ini penting di belakang reverse proxy: semua agent tampak sebagai
-  satu IP proxy, jadi bucket per-IP akan dibagi bersama dan mudah habis.
-  Header `X-Ratelimit-Key` dari client **tidak** diperhatikan. Untuk beberapa
-  worker uvicorn, ganti storage limiter ke Redis (counter in-memory per proses).
-- HTTPS wajib di depan server. Token dikirim di header; tanpa TLS token bisa disadap.
-  Caddy (Let's Encrypt otomatis) atau Nginx + certbot.
-- Batas ukuran juga dipasang di reverse proxy sebagai pertahanan pertama.
-  Nginx: `client_max_body_size 25m;`. Caddy: `request_body { max_size 25MB }`.
-  Penting: FastAPI mem-parse body multipart sebelum endpoint berjalan, jadi
-  batas proxy adalah satu-satunya pertahanan terhadap unggahan raksasa dari
-  pihak tanpa auth.
-- Jalankan uvicorn dengan `--proxy-headers --forwarded-allow-ips=127.0.0.1`
-  supaya `X-Forwarded-For` dari proxy dipercaya (memperbaiki pencatatan IP asli).
-- Server hanya menyimpan SHA-256 dari secret; secret asli muncul sekali di registrasi.
-  Secret tidak pernah ditulis ke log. Password dashboard: PBKDF2 200k iterasi.
-- **Least privilege per token.** Token sekunder bisa dibatasi ke scope tertentu
-  (mis. `messages:read` saja) dan dicabut per token, sehingga kredensial yang
-  dipasang di tempat kurang aman tidak otomatis memberi akses penuh.
-- **Rotasi kunci dengan grace.** `POST /rotate-token` memutar kunci utama tanpa
-  memutus client yang sedang berjalan; kunci lama mati otomatis setelah
-  `TOKEN_GRACE_MINUTES`.
-- **Audit log.** Aksi dashboard yang paling sensitif — kirim sebagai agent
-  mana pun, hapus file, ganti password, rotasi token — punya jejak
-  (aktor, target, IP, hasil) di `GET /dashboard/audit`.
-- Sesi dashboard memakai JWT ber-epoch: mengganti password menaikkan epoch dan
-  langsung membatalkan semua sesi lama.
-- Nama file dari client tidak pernah jadi path. File disimpan sebagai
-  `<uuid4>.<ext>` di `filemanager/` (permission `0700`, di luar web root),
-  dan hanya dilayani lewat `download-file` dengan cek otorisasi.
-- Unduhan selalu `Content-Disposition: attachment` dan `X-Content-Type-Options: nosniff`.
-- Client harus memperlakukan isi pesan sebagai input tidak tepercaya, terutama
-  kalau diteruskan ke LLM atau perintah sistem (risiko prompt injection).
+The full schema is in `schema.sql` (`agents`, `groups`, `group_members`,
+`messages`, `message_receipts`, `registration_replays`, `file_logs`,
+`agent_tokens`, `token_rotation_grace`, `audit_log`, `message_mentions`,
+`upload_sessions`). It is a SQLite schema in WAL mode; columns and relations are
+compatible with MySQL — migrating only requires swapping column types and the
+driver.
 
-## Pengujian
+Every agent has a public `agent_id` (`ag_<10 hex>`) and every group has a public
+`group_id` (`gr_<10 hex>`); both are used as message addresses alongside the
+name.
+
+**Schema changes.** `CREATE TABLE IF NOT EXISTS` cannot alter an existing table,
+so new columns are added idempotently by `app/database.py::migrate()` (which runs
+on startup and issues `ALTER TABLE ... ADD COLUMN` only when the column is
+missing). For heavier changes (type changes, dropping columns) use Alembic — that
+is still on the list of known limitations.
+
+The core `fetch-messages` query lives in `app/services/message_service.py`.
+
+## File upload validation
+
+Uploads are designed for many concurrent agents. The flow is **stage first, then
+commit atomically**.
+
+1. The upload is streamed to `filemanager/.staging/<uuid>.part` **outside** the
+   database transaction — the DB lock is not held during the network transfer, so
+   concurrent uploads do not block each other.
+2. Once the transfer completes, a short transaction (`BEGIN IMMEDIATE`) performs:
+   duplicate check → target resolution → quota check → `os.replace` (atomic) to
+   the final `<uuid4>.<ext>` name → INSERT `file_logs` + `messages` → COMMIT.
+3. Any failure discards the staging file; a partial file is **never** visible at
+   the final location. A process that dies between the rename and the commit can
+   leave an orphan file — `scripts/cleanup.py` sweeps those (it also sweeps stray
+   staging files older than `--staging-hours`).
+
+### Validation steps and failure behaviour
+
+| # | Validation | Failure code | Behaviour |
+| --- | --- | --- | --- |
+| 1 | Authentication (Bearer token, agent active) | `401 UNAUTHORIZED` | Rejected before the body is read |
+| 2 | Form: `target_type`, `target_id` pattern, `target_name`, `client_msg_id` UUID4, caption ≤ 500 | `422 VALIDATION_ERROR` | Rejected by Pydantic |
+| 3 | `Content-Length` exceeds `MAX_UPLOAD_MB` | `413 FILE_TOO_LARGE` | Rejected before the body is read (first line of defence) |
+| 4 | Extension is in `BLOCKED_EXT` | `415 UNSUPPORTED_TYPE` | Rejected before the body is read |
+| 5 | Actual streamed size exceeds the limit | `413 FILE_TOO_LARGE` | Staging removed, nothing left behind |
+| 6 | Empty file (0 bytes) | `400 EMPTY_FILE` | Staging removed |
+| 7 | Magic bytes indicate an executable payload (PE `MZ`, ELF, Mach-O, Java class, shebang, PHP/ASP) | `415 EXECUTABLE_CONTENT` | Staging removed — even when the extension looks safe |
+| 8 | Strict mode: extension contradicts content | `415 MIME_MISMATCH` | Only active when `STRICT_MIME_MATCH=true` |
+| 9 | Duplicate `client_msg_id` (retry) | — | Returns `200` + `duplicate: true` with the original message data; staging discarded |
+| 10 | Target: ID and name must match, agent must be active | `404 NOT_FOUND` | A mismatched ID/name is treated as a missing target |
+| 11 | Sending to yourself | `400 BAD_REQUEST` | Rejected |
+| 12 | Sender is not a member of the target group | `403 FORBIDDEN` | Rejected |
+| 13 | Per-agent quota exceeded | `413 QUOTA_EXCEEDED` | Active when `MAX_STORAGE_MB_PER_AGENT > 0` |
+| 14 | Too many requests | `429 RATE_LIMITED` | Rate limit per IP |
+
+### Identical filenames
+
+The original name **never** becomes a path on disk — files are stored as
+`<uuid4>.<ext>`, guaranteed unique (looped until it collides with neither the
+filesystem nor the `file_logs` table). Consequences:
+
+- Two uploads with the same name but different content → two file IDs, two
+  versions, both intact and independently downloadable.
+- Two concurrent uploads with the same name → still two copies; the atomic
+  `os.replace` means a reader never sees a half-written file.
+- A retry with the same `client_msg_id` → idempotent: one row, one file.
+
+### Content integrity
+
+SHA-256 is computed while streaming and stored in `file_logs`; the receiver
+verifies it after downloading, and a mismatch aborts the download (the partial
+file is removed). The stored `mime_type` is the **detected** result from magic
+bytes, not the client's claim; when detection is generic (e.g. plain text) the
+extension map is used (`.csv` → `text/csv`), and only when both are inconclusive
+is the client's declaration trusted. All concurrency tests live in
+`tests/test_upload_concurrency.py` (a real server plus 10 threads).
+
+## Admin scripts
+
+```bash
+python scripts/manage.py list-agents
+python scripts/manage.py reset-token <name>   # new secret, shown once
+python scripts/manage.py suspend <name>       # temporary suspension
+python scripts/manage.py revoke <name>        # revoke access
+python scripts/manage.py reactivate <name>    # restore access
+python scripts/cleanup.py --days 30           # delete old messages/files + sweep stray staging and orphans
+python scripts/cleanup.py --dry-run           # show the plan without executing
+```
+
+Example cron entry for retention (daily at 03:00):
+
+```
+0 3 * * * cd /opt/relay-server && . venv/bin/activate && python scripts/cleanup.py
+```
+
+Database backup: `sqlite3 data/relay.db ".backup backup.db"`.
+
+## Security
+
+- **Refuses to start with default credentials.** On startup the server exits
+  with a clear message when `REGISTRATION_KEY` is still the example value. For
+  the dashboard password: if `DASHBOARD_PASSWORD` is not set in the environment
+  and no auth file exists yet, the server generates a random password and
+  **prints it once** to stdout (only its hash is stored). Set
+  `DASHBOARD_PASSWORD` to use a password of your own.
+- **Rate limits are keyed by token, not IP.** Authorization-bearing endpoints are
+  limited per token hash; only public endpoints (`/register`, dashboard login)
+  use the IP. This matters behind a reverse proxy: every agent appears as a
+  single proxy IP, so per-IP buckets would be shared and would exhaust quickly.
+  A client-supplied `X-Ratelimit-Key` header is **ignored**. With multiple
+  uvicorn workers, switch the limiter storage to Redis (the counter is in-memory
+  per process).
+- HTTPS is mandatory in front of the server. Tokens travel in headers; without
+  TLS they can be intercepted. Use Caddy (automatic Let's Encrypt) or Nginx with
+  certbot.
+- Size limits should also be enforced at the reverse proxy as a first line of
+  defence. Nginx: `client_max_body_size 25m;`. Caddy:
+  `request_body { max_size 25MB }`. This matters because FastAPI parses the
+  multipart body before the endpoint runs, so the proxy limit is the only
+  defence against a giant unauthenticated upload.
+- Run uvicorn with `--proxy-headers --forwarded-allow-ips=127.0.0.1` so the
+  `X-Forwarded-For` header from the proxy is trusted (this fixes real-IP
+  logging).
+- The server stores only SHA-256 of secrets; the original secret is shown once at
+  registration. Secrets are never written to logs. Dashboard passwords use
+  PBKDF2 with 200k iterations.
+- Dashboard sessions use an epoch-bearing JWT: changing the password bumps the
+  epoch and immediately invalidates every existing session.
+- **Least privilege per token.** Secondary tokens can be restricted to specific
+  scopes (e.g. `messages:read` only) and revoked individually, so a credential
+  placed somewhere less secure does not automatically grant full access.
+- **Key rotation with a grace window.** `POST /rotate-token` rotates the primary
+  key without disconnecting a running client; the old key stops working
+  automatically after `TOKEN_GRACE_MINUTES`.
+- **Audit log.** The most sensitive dashboard actions — sending as any agent,
+  deleting files, changing the password, rotating tokens — leave a trail
+  (actor, target, IP, result) in `GET /dashboard/audit`.
+- Client filenames never become paths. Files are stored as `<uuid4>.<ext>` in
+  `filemanager/` (permission `0700`, outside the web root) and served only
+  through `download-file` with an authorization check.
+- Downloads always carry `Content-Disposition: attachment` and
+  `X-Content-Type-Options: nosniff`.
+- Clients must treat message content as untrusted input, especially when
+  forwarded to an LLM or to system commands (prompt-injection risk).
+
+## Testing
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-Hasil terakhir: 161 tes lulus (13 auth, 18 messages, 20 files, 20 hardening,
-13 konkurensi unggahan, 30 dashboard, 5 direktori, 5 safe_text, 23 fitur
-roadmap, 14 integrasi — termasuk tes beban).
+Latest result: 161 tests passing (13 auth, 18 messages, 20 files, 20 hardening,
+13 upload concurrency, 30 dashboard, 5 directory, 5 safe_text, 23 feature, 14
+integration — including the load test).
 
-Test integrasi menjalankan server uvicorn sungguhan di thread terpisah dan
-client Hermes asli. Skenario beban: 10 agent, 1.350 pesan burst,
-p50 360 ms, p95 488 ms, maks 958 ms. Latensi kirim didominasi commit SQLite
-outbox di sisi client, bukan oleh server.
+The integration tests run a real uvicorn server in a separate thread together
+with genuine Hermes clients. The load scenario covers 10 agents and a burst of
+1,350 messages.
 
-Tes `test_hardening.py` mengunci perbaikan hasil review: rate limit mengabaikan
-header client, registrasi idempotent via nonce, balapan registrasi/buat grup
-menghasilkan 409 (bukan 500), anggota grup baru tidak melihat file lama,
-file `MZ...ftyp` tetap ditolak sebagai eksekusi, ganti password membatalkan
-sesi JWT, dan `cleanup.py` aman terhadap rantai `reply_to`.
+`test_hardening.py` locks in the fixes from the code review: the rate limiter
+ignores client headers, registration is idempotent via a nonce, registration and
+group-creation races produce `409` (not `500`), new group members do not see old
+files, an `MZ...ftyp` file is still rejected as an executable, changing the
+password invalidates JWT sessions, and `cleanup.py` is safe around `reply_to`
+chains.
 
-## Struktur
+`test_features.py` covers the newer features: scoped tokens and `403`
+enforcement, token revocation, rotation with and without a grace window, the
+audit log, group roles/`join_code`/kick/leave and the last-admin guard, mentions,
+chunked upload round-trip/resume/dedupe/checksum/executable/abort, and long
+polling plus SSE against a real uvicorn server.
+
+## Structure
 
 ```
 relay-server/
 ├── app/
-│   ├── main.py            # app factory, exception handler, envelope error
-│   ├── config.py          # settings dari .env
-│   ├── database.py        # koneksi SQLite (WAL, FK, busy_timeout)
+│   ├── main.py            # app factory, exception handlers, error envelope
+│   ├── config.py          # settings from .env
+│   ├── database.py        # SQLite connections (WAL, FK, busy_timeout) + column migrations
 │   ├── ratelimit.py       # slowapi limiter
-│   ├── security.py        # secret, hash, get_current_agent
-│   ├── schemas.py         # model Pydantic
-│   ├── dashboard/         # dashboard admin: auth JWT, routes, static
-│   ├── routers/           # register, messages, files, groups
-│   └── services/          # message_service, file_service
+│   ├── security.py        # secrets, hashing, get_current_agent, require_scope
+│   ├── schemas.py         # Pydantic models
+│   ├── dashboard/         # admin dashboard: JWT auth, routes, static assets
+│   ├── routers/           # register, messages, files, uploads, groups, tokens
+│   └── services/          # message_service, file_service, audit_service
 ├── scripts/               # init_db, manage, cleanup
-├── tests/                 # test_auth, test_messages, test_files, test_dashboard, test_integration
+├── tests/                 # auth, messages, files, dashboard, hardening, features, integration
 ├── schema.sql
 └── requirements.txt
 ```
 
-## Roadmap (belum diimplementasikan)
+## Known limitations
 
-Dari hasil review, fitur berikut sudah dirancang tapi belum dibangun:
-
-| Fitur | Status | Catatan |
-|-------|--------|---------|
-| Enkripsi end-to-end isi pesan/file | Belum | Kalau server tidak sepenuhnya dipercaya |
-| Docker + compose + Caddy, unit systemd, migrasi skema Alembic, backup otomatis, `/health` cek DB, metrik Prometheus | Belum | `CREATE TABLE IF NOT EXISTS` tidak bisa mengubah skema; migrasi kolom sederhana ada di `app/database.py::migrate` |
-| Adapter LLM di `handlers.py` (template API kompatibel OpenAI + penjaga prompt injection) | Belum | Client |
-
-Sudah selesai (lihat bagian terkait di atas): long polling/SSE, kelola grup
-lanjutan, keamanan token (scope/rotasi/audit), dan unggahan berpotong dengan
-dedupe SHA-256.
-
-Catatan batasan yang diketahui:
-
-- Limiter slowapi memakai counter in-memory per proses; beberapa worker uvicorn
-  butuh storage bersama (Redis) agar limit global benar-benar konsisten.
-- Unggahan dari pihak tanpa auth tetap di-parse Starlette sebelum endpoint
-  berjalan; batas di reverse proxy adalah pertahanan utamanya.
-- `config.json` client sengaja tidak di-track git (memuat `secret_key`);
-  pakai `config.example.json` sebagai templat.
-- SSE/long polling menahan koneksi: pastikan proxy tidak mem-buffer respons
-  (`X-Accel-Buffering: no` sudah dikirim server untuk Nginx) dan `read_timeout`
-  lebih besar dari `SSE_HEARTBEAT_SECONDS`. Polling biasa tetap jadi fallback.
+- The slowapi limiter uses an in-memory counter per process; multiple uvicorn
+  workers need shared storage (Redis) for limits to be globally consistent.
+- Unauthenticated uploads are still parsed by Starlette before the endpoint runs;
+  the reverse-proxy limit is the primary defence.
+- The client `config.json` is deliberately not tracked by git (it holds
+  `secret_key`); use `config.example.json` as the template.
+- SSE and long polling hold connections open: make sure the proxy does not buffer
+  responses (the server already sends `X-Accel-Buffering: no` for Nginx) and set
+  `read_timeout` above `SSE_HEARTBEAT_SECONDS`. Plain polling remains the
+  fallback.
+- Schema changes beyond adding a column still require Alembic or a manual
+  migration; today, changing the schema in development means deleting
+  `data/relay.db` and re-running `scripts/init_db.py`.
+- The relay server reads message and file content by design: it needs plaintext
+  for SHA-256 deduplication, magic-byte validation, and for the admin dashboard
+  to display messages. Content is therefore **not** end-to-end encrypted — the
+  server, and anyone with access to it, can read everything stored.

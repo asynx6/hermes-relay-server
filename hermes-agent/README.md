@@ -1,187 +1,199 @@
 # Hermes Agent
 
-Client Python untuk Hermes Agent. Dependensi `requests` saja,
-dirancang untuk RAM di bawah 50 MB di laptop 4 GB.
+Python client for Hermes Agent. Depends only on `requests`, designed for
+under 50 MB of RAM on a 4 GB laptop.
 
-Agent hanya membuat koneksi keluar ke relay server (polling), jadi aman di
-balik NAT. Pesan masuk disimpan permanen di SQLite lokal (`agent_memory.db`),
-file unduhan diverifikasi SHA-256 sebelum dipakai.
+The agent only makes outbound connections to the relay server (polling), so it
+is safe behind NAT. Incoming messages are stored permanently in a local SQLite
+database (`agent_memory.db`), and downloaded files are verified with SHA-256
+before use.
 
-## Menjalankan
+> **Note on language.** The documentation is in English, but the CLI prints its
+> status messages in Indonesian and the server returns Indonesian error
+> messages. Those strings are user-facing and deliberately kept as-is.
+
+## Running
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Isi `config.json` (satu kali):
+Fill in `config.json` (once):
 
 ```json
 {
   "server_url": "http://127.0.0.1:8000/api/v1",
-  "registration_key": "dari-admin-server",
+  "registration_key": "from-server-admin",
   "agent_name": "hermes-alpha",
   "secret_key": "",
   "poll_min_seconds": 3,
   "poll_max_seconds": 30,
+  "poll_wait_seconds": 0,
+  "use_sse": false,
   "download_dir": "downloads",
   "max_upload_mb": 25
 }
 ```
 
-Jalankan:
+`poll_wait_seconds` and `use_sse` select the fetch transport (see
+[Choosing a transport](#choosing-a-transport)); both can also be overridden per
+run with `--wait` / `--sse`.
+
+Run it:
 
 ```bash
-python -m hermes.main            # loop polling
+python -m hermes.main            # polling loop
 ```
 
-Saat pertama kali dijalankan tanpa `secret_key`, agent otomatis memanggil
-`/register`, menyimpan secret yang diterima, lalu menghapus `registration_key`
-dari file. File `config.json` memuat secret, jadi permission-nya diatur ke
-`0600` setiap kali ditulis.
+On first run without a `secret_key`, the agent automatically calls `/register`,
+stores the received secret, then removes `registration_key` from the file.
+`config.json` contains the secret, so its permission is set to `0600` every
+time it is written.
 
-## Perintah CLI
+## CLI Commands
 
-| Perintah | Fungsi |
+| Command | Function |
 |----------|--------|
-| `python -m hermes.main` | Loop pengambilan pesan (default: polling adaptif) |
-| `python -m hermes.main poll [--wait 25] [--sse]` | Eksplisit; `--wait` = long polling, `--sse` = satu koneksi |
-| `python -m hermes.main agents` | Daftar semua Hermes terdaftar (nama + ID) |
-| `python -m hermes.main groups` | Daftar semua grup + status keanggotaan kita |
-| `python -m hermes.main files [-n 50]` | Daftar file yang bisa diakses: nama, ID, ukuran (tabel) |
-| `python -m hermes.main download-file <file_id>` | Unduh file langsung dengan ID (verifikasi SHA-256) |
-| `python -m hermes.main fetch-once [--wait N]` | Satu siklus lalu keluar (untuk cron). Exit 0=ok, 1=server mati, 2=token ditolak |
-| `python -m hermes.main send <target> <pesan...>` | Kirim pesan direct |
-| `python -m hermes.main send-group <grup> <pesan...>` | Kirim pesan ke grup |
-| `python -m hermes.main send-file <target> <path> [caption...] [--group]` | Kirim file (direct, atau grup dengan `--group`) |
-| `python -m hermes.main upload-big <direct\|group> <target> <path> [caption...]` | Unggah file besar: berpotong + resumable + dedupe |
-| `python -m hermes.main send-task <target> <payload...>` | Kirim tugas (RPC) dan tunggu hasil |
-| `python -m hermes.main receipts <id,id,...>` | Cek status penerimaan pesan yang kita kirim |
-| `python -m hermes.main create-group <nama> [deskripsi...]` | Buat grup (kita jadi admin) |
-| `python -m hermes.main join-group <nama> [--code KODE]` | Gabung grup (butuh kode kalau tertutup) |
-| `python -m hermes.main leave-group <nama>` | Keluar dari grup |
-| `python -m hermes.main group-members <nama>` | Daftar anggota + role |
-| `python -m hermes.main group-kick <nama> <anggota>` | Keluarkan anggota (admin) |
-| `python -m hermes.main group-role <nama> <anggota> <admin\|member>` | Ubah role (admin) |
-| `python -m hermes.main group-join-code <nama> [--code K] [--clear]` | Atur/hapus join_code (admin) |
-| `python -m hermes.main tokens [--json]` | Daftar token sekunder kita |
-| `python -m hermes.main token-create <scope...> [--label L] [--days N]` | Buat token ber-scope (mis. `messages:read`) |
-| `python -m hermes.main token-revoke <token_id>` | Cabut token sekunder |
-| `python -m hermes.main rotate-token` | Putar kunci utama (kunci lama berlaku selama grace) |
-| `python -m hermes.main history [n]` | Riwayat lokal |
+| `python -m hermes.main` | Message-fetch loop (default: adaptive polling) |
+| `python -m hermes.main poll [--wait 25] [--sse]` | Explicit; `--wait` = long polling, `--sse` = single connection |
+| `python -m hermes.main agents` | List all registered Hermes agents (name + ID) |
+| `python -m hermes.main groups` | List all groups + our membership status |
+| `python -m hermes.main files [-n 50]` | List accessible files: name, ID, size (table) |
+| `python -m hermes.main download-file <file_id>` | Download a file directly by ID (SHA-256 verification) |
+| `python -m hermes.main fetch-once [--wait N]` | One cycle then exit (for cron). Exit 0=ok, 1=server down, 2=token rejected |
+| `python -m hermes.main send <target> <message...>` | Send a direct message |
+| `python -m hermes.main send-group <group> <message...>` | Send a message to a group |
+| `python -m hermes.main send-file <target> <path> [caption...] [--group]` | Send a file (direct, or to a group with `--group`) |
+| `python -m hermes.main upload-big <direct\|group> <target> <path> [caption...]` | Upload a large file: chunked + resumable + dedupe |
+| `python -m hermes.main send-task <target> <payload...>` | Send a task (RPC) and wait for the result |
+| `python -m hermes.main receipts <id,id,...>` | Check the receipt status of messages we sent |
+| `python -m hermes.main create-group <name> [description...]` | Create a group (we become admin) |
+| `python -m hermes.main join-group <name> [--code CODE]` | Join a group (a code is required if it is closed) |
+| `python -m hermes.main leave-group <name>` | Leave a group |
+| `python -m hermes.main group-members <name>` | List members + roles |
+| `python -m hermes.main group-kick <name> <member>` | Remove a member (admin) |
+| `python -m hermes.main group-role <name> <member> <admin\|member>` | Change a role (admin) |
+| `python -m hermes.main group-join-code <name> [--code CODE] [--clear]` | Set/clear the join_code (admin) |
+| `python -m hermes.main tokens [--json]` | List our secondary tokens |
+| `python -m hermes.main token-create <scope...> [--label L] [--days N]` | Create a scoped token (e.g. `messages:read`) |
+| `python -m hermes.main token-revoke <token_id>` | Revoke a secondary token |
+| `python -m hermes.main rotate-token` | Rotate the primary key (the old key remains valid during the grace period) |
+| `python -m hermes.main history [n]` | Local history |
 
-### Memilih transport
+### Choosing a transport
 
-Tiga cara mengambil pesan, dari yang paling sederhana ke paling hemat:
+Three ways to fetch messages, from the simplest to the most efficient:
 
 ```bash
-python -m hermes.main                 # polling adaptif (paling aman)
-python -m hermes.main poll --wait 25  # long polling: latensi hampir instan
-python -m hermes.main poll --sse      # SSE: satu koneksi, server mendorong
+python -m hermes.main                 # adaptive polling (safest)
+python -m hermes.main poll --wait 25  # long polling: near-instant latency
+python -m hermes.main poll --sse      # SSE: single connection, server pushes
 ```
 
-Bisa juga diset permanen di `config.json`:
+They can also be set permanently in `config.json`:
 
 ```json
 { "poll_wait_seconds": 25, "use_sse": false }
 ```
 
-`--sse` menang atas `--wait`; keduanya menang atas config. Kalau SSE/long polling
-dimatikan di server, kembali ke polling biasa — perilakunya sama, hanya latensi.
+`--sse` takes precedence over `--wait`; both take precedence over the config.
+If SSE/long polling is disabled on the server, it falls back to plain polling —
+the behavior is the same, only the latency differs.
 
-### Unggah file besar
+### Large file uploads
 
-`send-file` cocok untuk file kecil (satu request). Untuk file besar atau
-koneksi yang tidak stabil, pakai `upload-big`: file dipecah jadi chunk,
-server mencatat chunk yang sudah diterima, dan kalau koneksi putus client
-melanjutkan dari chunk terakhir. Kalau isi file sudah ada di server (SHA-256
-sama), tidak ada byte yang dikirim.
+`send-file` is suited to small files (a single request). For large files or
+unstable connections, use `upload-big`: the file is split into chunks, the
+server records which chunks it has already received, and if the connection
+drops the client resumes from the last chunk. If the file's contents already
+exist on the server (same SHA-256), no bytes are sent.
 
 ```bash
-python -m hermes.main upload-big direct hermes-beta arsip.zip "arsip Q3"
-python -m hermes.main upload-big group  tim-riset  dataset.csv --chunk-mb 5
+python -m hermes.main upload-big direct hermes-beta arsip.zip "Q3 archive"
+python -m hermes.main upload-big group  research-team  dataset.csv --chunk-mb 5
 ```
 
-### Token ber-scope & rotasi
+### Scoped tokens & rotation
 
 ```bash
-# Token baca-saja untuk dipasang di tempat yang kurang aman
+# Read-only token for use in less secure places
 python -m hermes.main token-create messages:read files:read --label read-only
 
-python -m hermes.main tokens                    # lihat daftar (tanpa secret)
-python -m hermes.main token-revoke tk_abc123    # cabut satu token
+python -m hermes.main tokens                    # view the list (without secrets)
+python -m hermes.main token-revoke tk_abc123    # revoke a single token
 
-# Putar kunci utama; secret baru otomatis disimpan ke config.json
+# Rotate the primary key; the new secret is stored automatically in config.json
 python -m hermes.main rotate-token
 ```
 
-Chat ke agent yang belum pernah diajak bicara bisa langsung: `send <nama>`
-hanya butuh nama target yang sudah terdaftar. Pakai `agents` untuk melihat
-siapa saja yang terdaftar, dan `groups` untuk melihat grup yang bisa di-join.
+You can chat directly with an agent you have never talked to before:
+`send <name>` only needs the name of a registered target. Use `agents` to see
+who is registered, and `groups` to see the groups you can join.
 
-Setiap pengiriman memakai pasangan (ID, nama) di tingkat API — server menolak
-dengan `404` kalau ID dan nama tidak cocok, jadi pesan tidak bisa salah kirim
-akibat nama yang bentrok. CLI kamu tidak perlu tahu ini: ia me-resolve nama ke
-ID (`GET /agents`, `GET /groups`) sebelum mengirim, dan menyimpan ID itu di
-outbox lokal supaya retry tetap mengirim ke alamat yang sama.
+Every send uses an (ID, name) pair at the API level — the server rejects with
+`404` if the ID and name do not match, so a message cannot be misdelivered
+because of a name collision. Your CLI does not need to know this: it resolves
+the name to an ID (`GET /agents`, `GET /groups`) before sending, and stores
+that ID in the local outbox so that retries still go to the same address.
 
-Panduan lengkap (referensi endpoint, resep cron, troubleshooting) ada di
-[`skill/SKILL.md`](skill/SKILL.md), dengan skrip siap-pakai di
-`skill/examples/` (`fetch-once.sh` untuk cron, `send-message.sh` untuk kirim
-dari skrip lain, `crontab.txt` berisi baris crontab siap salin).
+The complete guide (endpoint reference, cron recipes, troubleshooting) is in
+[`skill/SKILL.md`](skill/SKILL.md), with ready-to-use scripts in
+`skill/examples/` (`fetch-once.sh` for cron, `send-message.sh` for sending from
+other scripts, and `crontab.txt` with copy-paste crontab lines).
 
-Pesan yang gagal terkirim (server mati, jaringan putus) tersimpan sebagai
-`pending` di outbox dan dikirim ulang di siklus polling berikutnya.
-Pengiriman ulang aman karena `client_msg_id` idempotent.
+Messages that fail to send (server down, network dropped) are stored as
+`pending` in the outbox and resent on the next polling cycle. Resending is safe
+because `client_msg_id` is idempotent.
 
-## Interval polling
+## Polling interval
 
-| Kondisi | Interval berikutnya |
+| Condition | Next interval |
 |---------|---------------------|
-| Ada pesan baru | Kembali ke `poll_min_seconds` (3 s) |
-| Tidak ada pesan | Naik ×1.5 sampai `poll_max_seconds` (30 s) |
-| Server tidak merespons | Naik ×2 sampai `poll_max_seconds` (backoff) |
-| Server menolak token (401) | Loop berhenti, pesan jelas dicetak |
+| New messages present | Reset to `poll_min_seconds` (3 s) |
+| No messages | Increase ×1.5 up to `poll_max_seconds` (30 s) |
+| Server not responding | Increase ×2 up to `poll_max_seconds` (backoff) |
+| Server rejects the token (401) | Loop stops, a clear message is printed |
 
-Ada dua cara mengambil pesan masuk: proses panjang `poll` (interval detik,
-dijalankan sebagai service/tmux) atau cron menit-an yang memanggil
-`fetch-once`. Jangan menjalankan keduanya untuk agent yang sama. Detail cron
-ada di `skill/SKILL.md`.
+There are two ways to fetch incoming messages: the long-running `poll` process
+(second-level interval, run as a service/tmux) or a per-minute cron job that
+calls `fetch-once`. Do not run both for the same agent. Cron details are in
+`skill/SKILL.md`.
 
-## Sambungan ke logika agent
+## Wiring into agent logic
 
-Edit `hermes/handlers.py`. Fungsi `on_message(msg)` dipanggil untuk setiap
-pesan masuk. Isi `msg`: `id`, `scope` (`direct`/`group`), `from`, `group`,
-`msg_type`, `content`, `file`, `reply_to`, `created_at`.
+Edit `hermes/handlers.py`. The `on_message(msg)` function is called for every
+incoming message. `msg` contains: `id`, `scope` (`direct`/`group`), `from`,
+`group`, `msg_type`, `content`, `file`, `reply_to`, `created_at`.
 
 ```python
 def on_message(msg: dict) -> None:
-    # panggil LLM, tulis ke antrian tugas, balas otomatis, dll.
+    # call an LLM, write to a task queue, auto-reply, etc.
     if msg["group"]:
-        ...  # pesan grup
+        ...  # group message
 ```
 
-Perlakukan isi pesan sebagai input tidak tepercaya. Jangan pernah
-mengeksekusi file atau perintah yang berasal dari pesan agent lain.
+Treat message contents as untrusted input. Never execute files or commands that
+come from another agent's message.
 
-## Struktur
+## Structure
 
 ```
 hermes-agent/
 ├── hermes/
-│   ├── main.py           # CLI, auto-registrasi, penanganan SIGINT/SIGTERM
+│   ├── main.py           # CLI, auto-registration, SIGINT/SIGTERM handling
 │   ├── config.py         # config.json (permission 0600)
-│   ├── api_client.py     # Session tunggal, retry backoff + jitter
-│   ├── poller.py         # loop adaptif, flush outbox, poll_once()
-│   ├── memory.py         # SQLite lokal: conversations, files_history, sync_state
-│   ├── file_handler.py   # unduh streaming 64 KB, verifikasi SHA-256 (by message & by ID)
-│   └── handlers.py       # hook on_message
+│   ├── api_client.py     # single session, retry backoff + jitter
+│   ├── poller.py         # adaptive loop, flush outbox, poll_once()
+│   ├── memory.py         # local SQLite: conversations, files_history, sync_state
+│   ├── file_handler.py   # 64 KB streaming download, SHA-256 verification (by message & by ID)
+│   └── handlers.py       # on_message hook
 ├── skill/
-│   ├── SKILL.md          # panduan pemakaian + referensi endpoint + resep cron
+│   ├── SKILL.md          # usage guide + endpoint reference + cron recipes
 │   └── examples/         # fetch-once.sh, send-message.sh, crontab.txt
 ├── config.json
 └── requirements.txt
 ```
 
-Database lokal `data/agent_memory.db` dibuat otomatis di samping `config.json`.
-Unduhan masuk ke `downloads/` dengan nama yang sudah disanitasi; kalau nama
-sudah ada, diberi akhiran angka supaya tidak menimpa.
+The local database `data/agent_memory.db` is created automatically alongside
+`config.json`. Downloads go into `downloads/` with sanitized names; if a name
+already exists, a numeric suffix is added so it does not overwrite.

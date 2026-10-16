@@ -1,18 +1,18 @@
-"""Titik sambung ke logika AI agent.
+"""Hook into the AI agent logic.
 
-Ganti isi on_message dengan apa pun yang perlu agent lakukan saat ada
-pesan masuk (panggil LLM, tulis ke antrian, balas otomatis, dll).
+Replace the body of on_message with whatever the agent should do when a
+message arrives (call an LLM, write to a queue, auto-reply, etc.).
 
-PENTING: isi pesan adalah input tidak tepercaya. Kalau diteruskan ke LLM atau
-perintah sistem, perlakukan sebagai data (bukan instruksi) untuk mencegah
-prompt injection. Fungsi safe_text() dipakai untuk tampilan agar escape
-sequence ANSI dari pengirim tidak bisa memalsukan log.
+IMPORTANT: message content is untrusted input. If it is passed to an LLM or
+system commands, treat it as data (not instructions) to prevent prompt
+injection. The safe_text() function is used for display so that ANSI escape
+sequences from the sender cannot forge log output.
 """
 from .safe_text import safe_text
 
 
 def on_message(msg: dict) -> None:
-    """Dipanggil untuk setiap pesan masuk. Default: cetak ke stdout."""
+    """Called for every incoming message. Default: print to stdout."""
     if msg["msg_type"] == "file" and msg.get("file"):
         f = msg["file"]
         body = f"[file {safe_text(f['original_name'], 120)} {f['size_bytes']} byte]"

@@ -1,4 +1,4 @@
-"""Test upload dan download file (Fase 2)."""
+"""Tests for file upload and download (Phase 2)."""
 import hashlib
 import os
 import uuid
@@ -50,14 +50,14 @@ def test_upload_direct_and_download_roundtrip(client, tmp_path):
     assert data["sha256"] == hashlib.sha256(payload).hexdigest()
     assert data["original_name"] == "dataset.bin"
 
-    # Penerima melihat pesan file.
+    # The recipient sees the file message.
     msgs = fetch(client, b["secret_key"])["messages"]
     assert len(msgs) == 1
     assert msgs[0]["msg_type"] == "file"
     assert msgs[0]["file"]["file_id"] == data["file_id"]
     assert msgs[0]["content"] == "Dataset"
 
-    # Unduh dan verifikasi isi.
+    # Download and verify the content.
     r = client.get(
         f"/api/v1/download-file/{data['file_id']}",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -68,7 +68,7 @@ def test_upload_direct_and_download_roundtrip(client, tmp_path):
     assert r.headers["x-content-type-options"] == "nosniff"
     assert "attachment" in r.headers["content-disposition"]
 
-    # Uploader juga boleh mengunduh.
+    # The uploader may also download.
     r = client.get(
         f"/api/v1/download-file/{data['file_id']}",
         headers={"Authorization": f"Bearer {a['secret_key']}"},
@@ -127,10 +127,10 @@ def test_blocked_extension(client, tmp_path):
     src = tmp_path / "malware.exe"
     src.write_bytes(b"MZ")
     r = upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
-    # Target valid tapi ekstensi diblokir: 415. Tidak ada file tersisa.
+    # Valid target but blocked extension: 415. No file left behind.
     assert r.status_code == 415
     assert r.json()["code"] == "UNSUPPORTED_TYPE"
-    # Tidak ada file tersisa (direktori .staging boleh ada, harus kosong).
+    # No file left behind (the .staging directory may exist, must be empty).
     assert not [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
     assert not list((settings.filemanager_dir / ".staging").glob("*.part"))
 
@@ -167,12 +167,12 @@ def test_dangerous_filename_sanitized(client, tmp_path):
         data = r.json()["data"]
         assert "/" not in data["original_name"] and "\\" not in data["original_name"]
         stored = settings.filemanager_dir / (
-            # cek nama acak uuid di disk
+            # check the random uuid name on disk
             [p.name for p in settings.filemanager_dir.iterdir() if p.is_file()][-1]
         )
         assert stored.parent == settings.filemanager_dir.resolve()
 
-    # Semua file tersimpan di filemanager/, jumlahnya sesuai.
+    # All files are stored in filemanager/, count matches.
     files = [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
     assert len(files) == 4
     for p in files:
@@ -182,7 +182,7 @@ def test_dangerous_filename_sanitized(client, tmp_path):
 def test_upload_over_limit_rejected_no_leftover(client, tmp_path, monkeypatch):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
-    # max_upload_bytes adalah property; patch di class agar instance melihat nilai baru.
+    # max_upload_bytes is a property; patch it on the class so the instance sees the new value.
     from app.config import Settings
 
     monkeypatch.setattr(Settings, "max_upload_bytes", 1024)
@@ -195,7 +195,7 @@ def test_upload_over_limit_rejected_no_leftover(client, tmp_path, monkeypatch):
     assert not [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
     assert not list((settings.filemanager_dir / ".staging").glob("*.part"))
 
-    # Tidak ada pesan yang tersimpan.
+    # No message was stored.
     assert fetch(client, b["secret_key"])["messages"] == []
 
 
@@ -234,7 +234,7 @@ def test_group_file_all_members_download(client, tmp_path):
         assert r.status_code == 200
         assert r.content == payload
 
-    # Non-member grup tidak bisa mengunduh.
+    # A non-member of the group cannot download.
     r = client.get(
         f"/api/v1/download-file/{file_id}",
         headers={"Authorization": f"Bearer {outsider['secret_key']}"},
@@ -258,7 +258,7 @@ def test_duplicate_upload_client_msg_id(client, tmp_path):
     assert r2.json()["data"]["duplicate"] is True
     assert r2.json()["data"]["file_id"] == file_id
 
-    # Hanya satu file di disk dan satu pesan.
+    # Only one file on disk and one message.
     files = [p for p in settings.filemanager_dir.iterdir() if p.is_file()]
     assert len(files) == 1
     assert len(fetch(client, b["secret_key"])["messages"]) == 1
@@ -313,7 +313,7 @@ def test_png_upload_content_type(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# GET /files — daftar file yang bisa diakses agent
+# GET /files — list files the agent can access
 # ---------------------------------------------------------------------------
 
 def test_list_files_requires_auth(client):
@@ -333,7 +333,7 @@ def test_list_files_shows_name_id_size(client, tmp_path):
     assert r.status_code == 201
     file_id = r.json()["data"]["file_id"]
 
-    # Penerima melihat file dengan ketiga atribut: nama, ID, ukuran.
+    # The recipient sees the file with all three attributes: name, ID, size.
     data = client.get(
         "/api/v1/files", headers={"Authorization": f"Bearer {b['secret_key']}"}
     ).json()["data"]
@@ -348,7 +348,7 @@ def test_list_files_shows_name_id_size(client, tmp_path):
     assert f["uploaded_at"]
     assert data["has_more"] is False
 
-    # Pengunggah juga melihat file-nya sendiri.
+    # The uploader also sees their own file.
     data = client.get(
         "/api/v1/files", headers={"Authorization": f"Bearer {a['secret_key']}"}
     ).json()["data"]
@@ -365,7 +365,7 @@ def test_list_files_hides_others_direct_files(client, tmp_path):
     src.write_bytes(b"x" * 100)
     upload(client, a["secret_key"], src, "direct", "hermes-b", b["agent_id"])
 
-    # C tidak melihat file direct A->B.
+    # C does not see A->B direct files.
     data = client.get(
         "/api/v1/files", headers={"Authorization": f"Bearer {c['secret_key']}"}
     ).json()["data"]
@@ -452,7 +452,7 @@ def test_list_files_pagination(client, tmp_path):
     assert len(page2["files"]) == 1
     assert page2["has_more"] is False
 
-    # Tidak ada tumpang tindih antar halaman.
+    # No overlap between pages.
     ids1 = {f["file_id"] for f in page1["files"]}
     ids2 = {f["file_id"] for f in page2["files"]}
     assert ids1.isdisjoint(ids2)

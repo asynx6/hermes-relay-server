@@ -1,9 +1,9 @@
-"""Tes hasil review keamanan & ketahanan (register idempotency, ack/task,
-sniff eksekusi, rate-limit keying, epoch JWT, race registrasi/grup,
-visibilitas file lama untuk anggota baru, cleanup aman FK).
+"""Tests from the security & resilience review (register idempotency, ack/task,
+executable sniff, rate-limit keying, JWT epoch, register/group races,
+visibility of old files for new members, FK-safe cleanup).
 
-Menggunakan TestClient untuk alur endpoint dan server uvicorn sungguhan
-untuk uji balapan (thread).
+Uses TestClient for endpoint flows and a real uvicorn server
+for race tests (threads).
 """
 import hashlib
 import os
@@ -23,7 +23,7 @@ API = "/api/v1"
 
 
 # ---------------------------------------------------------------------------
-# Registrasi idempotent dengan nonce
+# Idempotent registration with a nonce
 # ---------------------------------------------------------------------------
 
 def test_register_nonce_replay_same_secret(client):
@@ -36,8 +36,8 @@ def test_register_nonce_replay_same_secret(client):
     assert first.status_code == 201
     secret1 = first.json()["data"]["secret_key"]
 
-    # Simulasi: respons 201 hilang, agent belum menyimpan secret, lalu retry
-    # dengan nonce yang sama. Harus dapat secret yang sama, bukan 409.
+    # Simulation: the 201 response is lost, the agent has not stored the secret,
+    # then retries with the same nonce. It must get the same secret, not a 409.
     again = client.post(
         f"{API}/register",
         headers={"X-Registration-Key": "test-registration-key"},
@@ -94,14 +94,14 @@ def test_ack_and_receipts_flow(client):
     data = send(client, a["secret_key"], "direct", "hermes-b", "pesan untuk di-ack")
     message_id = data["message_id"]
 
-    # Sebelum ack: tidak ada receipt.
+    # Before ack: no receipt.
     r = client.get(
         f"{API}/receipts?message_ids={message_id}",
         headers={"Authorization": f"Bearer {a['secret_key']}"},
     )
     assert r.json()["data"]["receipts"] == []
 
-    # B meng-ack.
+    # B acks.
     r = client.post(
         f"{API}/ack",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -109,7 +109,7 @@ def test_ack_and_receipts_flow(client):
     )
     assert r.status_code == 200
 
-    # A melihat receipt dari B.
+    # A sees the receipt from B.
     r = client.get(
         f"{API}/receipts?message_ids={message_id}",
         headers={"Authorization": f"Bearer {a['secret_key']}"},
@@ -131,12 +131,12 @@ def test_ack_only_for_visible_messages(client):
         headers={"Authorization": f"Bearer {c['secret_key']}"},
         json={"message_ids": [data["message_id"]]},
     )
-    assert r.status_code == 200  # diabaikan, bukan error
+    assert r.status_code == 200  # ignored, not an error
     receipts = client.get(
         f"{API}/receipts?message_ids={data['message_id']}",
         headers={"Authorization": f"Bearer {a['secret_key']}"},
     ).json()["data"]["receipts"]
-    assert receipts == []  # C tidak terdaftar sebagai penerima
+    assert receipts == []  # C is not registered as a recipient
 
 
 def test_task_result_rpc_flow(client):
@@ -144,7 +144,7 @@ def test_task_result_rpc_flow(client):
     b = register_agent(client, "hermes-b")
     task_id = f"task_{uuid.uuid4().hex[:16]}"
 
-    # A kirim tugas.
+    # A sends a task.
     r = client.post(
         f"{API}/send-message",
         headers={"Authorization": f"Bearer {a['secret_key']}"},
@@ -161,7 +161,7 @@ def test_task_result_rpc_flow(client):
     )
     assert r.status_code == 201
 
-    # B membalas dengan result.
+    # B replies with the result.
     r = client.post(
         f"{API}/send-message",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -178,7 +178,7 @@ def test_task_result_rpc_flow(client):
     )
     assert r.status_code == 201
 
-    # Kedua sisi bisa melihat riwayat tugas.
+    # Both sides can see the task history.
     for agent in (a, b):
         task = client.get(
             f"{API}/tasks/{task_id}",
@@ -251,7 +251,7 @@ def test_task_messages_arrive_in_fetch(client):
     msgs = fetch(client, b["secret_key"])["messages"]
     assert msgs[0]["msg_type"] == "task"
     assert msgs[0]["task_id"] == task_id
-    # task_status opsional; tidak dikirim berarti null.
+    # task_status is optional; not sending it means null.
     assert msgs[0]["task_status"] is None
 
 
@@ -280,7 +280,7 @@ def test_task_messages_arrive_in_fetch_with_status(client):
 
 
 # ---------------------------------------------------------------------------
-# JWT dicabut saat password diganti
+# JWT revoked when the password is changed
 # ---------------------------------------------------------------------------
 
 def test_password_change_invalidates_sessions(client):
@@ -294,9 +294,9 @@ def test_password_change_invalidates_sessions(client):
     )
     assert r.status_code == 200
 
-    # Sesi lama harus ditolak.
+    # The old session must be rejected.
     assert client.get(f"{API}/dashboard/me").status_code == 401
-    # Login dengan password baru berhasil.
+    # Login with the new password succeeds.
     assert client.post(
         f"{API}/dashboard/login", json={"password": "rahasia-baru-1"}
     ).status_code == 200
@@ -324,7 +324,7 @@ def test_dashboard_send_as_agent_still_works(client):
 
 
 # ---------------------------------------------------------------------------
-# Anggota grup baru tidak bisa melihat file lama (bug #11)
+# New group members cannot see old files (bug #11)
 # ---------------------------------------------------------------------------
 
 def test_new_group_member_cannot_see_old_files(client, tmp_path):
@@ -353,14 +353,14 @@ def test_new_group_member_cannot_see_old_files(client, tmp_path):
     assert r.status_code == 201
     file_id = r.json()["data"]["file_id"]
 
-    # B join SEBELUM file diunggah? Tidak — kita balik urutan: B join dulu.
-    # File di atas diunggung setelah B join, jadi B boleh melihatnya.
+    # Did B join BEFORE the file was uploaded? No — we reverse the order: B joins first.
+    # The file above is uploaded after B joins, so B may see it.
     r = client.get(
         f"{API}/files", headers={"Authorization": f"Bearer {b['secret_key']}"}
     )
     assert r.json()["data"]["total"] == 1
 
-    # Sekarang c: join setelah file diunggah -> tidak boleh melihat.
+    # Now c: joins after the file was uploaded -> must not see it.
     c = register_agent(client, "hermes-c")
     client.post(
         "/api/v1/groups/research-team/join",
@@ -371,7 +371,7 @@ def test_new_group_member_cannot_see_old_files(client, tmp_path):
     )
     assert r.json()["data"]["total"] == 0
 
-    # Dan unduhannya juga harus ditolak walau tahu file_id.
+    # And the download must also be rejected even if the file_id is known.
     r = client.get(
         f"/api/v1/download-file/{file_id}",
         headers={"Authorization": f"Bearer {c['secret_key']}"},
@@ -380,11 +380,11 @@ def test_new_group_member_cannot_see_old_files(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Sniff: eksekusi tidak lolos lewat trik ftyp (bug #9)
+# Sniff: executable does not slip through via the ftyp trick (bug #9)
 # ---------------------------------------------------------------------------
 
 def test_executable_with_ftyp_bytes_rejected(client, tmp_path):
-    """MZ di awal + 'ftyp' di offset 4-8 harus tetap terdeteksi eksekusi."""
+    """MZ at the start + 'ftyp' at offset 4-8 must still be detected as an executable."""
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     src = tmp_path / "video.mp4"
@@ -427,7 +427,7 @@ def test_real_mp4_still_accepted(client, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Race condition: register & buat grup bersamaan -> 409, bukan 500
+# Race condition: concurrent register & group creation -> 409, not 500
 # ---------------------------------------------------------------------------
 
 def test_concurrent_register_same_name(live_server, agents_dir):
@@ -446,7 +446,7 @@ def test_concurrent_register_same_name(live_server, agents_dir):
 
     codes = sorted(r.status_code for r in responses)
     assert codes == [201, 409, 409, 409, 409, 409], codes
-    # Tidak boleh ada 500.
+    # There must be no 500.
     assert all(r.status_code != 500 for r in responses)
 
 
@@ -474,7 +474,7 @@ def test_concurrent_create_group_same_name(live_server, agents_dir):
 
 
 # ---------------------------------------------------------------------------
-# cleanup.py aman terhadap FK reply_to
+# cleanup.py is safe against the reply_to FK
 # ---------------------------------------------------------------------------
 
 def test_cleanup_safe_with_reply_chain(client):
@@ -484,7 +484,7 @@ def test_cleanup_safe_with_reply_chain(client):
     a = register_agent(client, "hermes-a")
     b = register_agent(client, "hermes-b")
     first = send(client, a["secret_key"], "direct", "hermes-b", "pesan awal")
-    # Balasan yang mereferensikan pesan pertama.
+    # A reply that references the first message.
     client.post(
         "/api/v1/send-message",
         headers={"Authorization": f"Bearer {b['secret_key']}"},
@@ -498,7 +498,7 @@ def test_cleanup_safe_with_reply_chain(client):
         },
     )
 
-    # Jalankan cleanup dengan retensi 0 hari (semua pesan "lama").
+    # Run cleanup with a 0-day retention (all messages are "old").
     conn = connect()
     old_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     conn.close()

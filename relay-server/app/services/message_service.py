@@ -1,9 +1,9 @@
-"""Logika pesan: idempotency, resolusi target, query fetch, keanggotaan grup.
+"""Message logic: idempotency, target resolution, fetch queries, group membership.
 
-Alamat pesan selalu pasangan (ID, nama): pengirim mengirim target_id +
-target_name, dan server hanya menerima pesan kalau baris dengan ID tersebut
-benar-benar bernama sesuai. Ini mencegah pesan salah kirim akibat nama yang
-berubah atau bentrok.
+A message address is always an (ID, name) pair: the sender sends target_id +
+target_name, and the server only accepts the message if the row with that ID
+is actually named accordingly. This prevents misdelivered messages caused by
+a changed or colliding name.
 """
 import re
 import secrets
@@ -16,13 +16,13 @@ ID_PATTERN_HINT = (
     "lihat GET /agents atau GET /groups."
 )
 
-# Mention @nama di dalam isi pesan. Nama agent mengikuti pola yang sama
-# dengan registrasi: huruf kecil, angka, '_' dan '-'.
+# @name mentions inside the message content. Agent names follow the same
+# pattern as registration: lowercase letters, digits, '_' and '-'.
 MENTION_RE = re.compile(r"@([a-z0-9][a-z0-9_-]{2,31})")
 
 
 def extract_mentions(content: str | None) -> list[str]:
-    """Ambil nama agent yang di-mention (@nama), unik, urut kemunculan."""
+    """Extract mentioned agent names (@name), unique, in order of appearance."""
     if not content:
         return []
     return list(dict.fromkeys(MENTION_RE.findall(content.lower())))
@@ -34,11 +34,11 @@ def store_mentions(
     group_id: int | None,
     names: list[str],
 ) -> list[str]:
-    """Catat mention ke `message_mentions`.
+    """Record mentions into `message_mentions`.
 
-    Di grup, hanya mention ke anggota grup yang dicatat — mention ke
-    non-anggota diabaikan (mereka memang tidak akan menerima pesannya).
-    Kembalikan nama yang benar-benar tercatat.
+    In a group, only mentions of group members are recorded — mentions of
+    non-members are ignored (they would not receive the message anyway).
+    Return the names actually recorded.
     """
     if not names:
         return []
@@ -86,7 +86,7 @@ def new_group_id(conn: sqlite3.Connection) -> str:
 def resolve_direct_target(
     conn: sqlite3.Connection, target_id: str, target_name: str
 ) -> sqlite3.Row:
-    """Cari agent aktif yang cocok dengan ID *dan* nama sekaligus."""
+    """Find an active agent matching the ID *and* the name at once."""
     row = conn.execute(
         "SELECT * FROM agents WHERE agent_id = ? AND name = ? COLLATE NOCASE "
         "AND status = 'active'",
@@ -102,7 +102,7 @@ def resolve_direct_target(
 def resolve_group_target(
     conn: sqlite3.Connection, target_id: str, target_name: str
 ) -> sqlite3.Row:
-    """Cari grup yang cocok dengan ID *dan* nama sekaligus."""
+    """Find a group matching the ID *and* the name at once."""
     row = conn.execute(
         "SELECT * FROM groups WHERE group_id = ? AND name = ? COLLATE NOCASE",
         (target_id, target_name),
@@ -195,12 +195,12 @@ def store_message(
 def task_thread(
     conn: sqlite3.Connection, task_id: str, agent_row_id: int
 ) -> list[dict]:
-    """Semua pesan dengan task_id tertentu yang terlihat oleh agent ini.
+    """All messages with a given task_id that are visible to this agent.
 
-    Dipakai pola RPC ringan: pengirim mengirim pesan bertipe `task`
-    dengan `task_id`, penerima membalas dengan pesan bertipe `result`
-    yang membawa `task_id` yang sama. Kedua sisi bisa membaca seluruh
-    riwayat satu tugas lewat GET /tasks/{task_id}.
+    Used for the lightweight RPC pattern: the sender sends a message of type
+    `task` with a `task_id`, the recipient replies with a message of type
+    `result` carrying the same `task_id`. Both sides can read the full history
+    of one task via GET /tasks/{task_id}.
     """
     rows = conn.execute(
         """SELECT m.id, m.msg_type, m.content, m.created_at, m.task_status,
@@ -242,10 +242,10 @@ def task_thread(
 def fetch_messages(
     conn: sqlite3.Connection, agent_row_id: int, since_id: int, limit: int
 ) -> tuple[list[dict], int, bool]:
-    """Ambil pesan untuk agent ini. Cursor since_id naik monotonik.
+    """Fetch messages for this agent. The since_id cursor rises monotonically.
 
-    Filter keanggotaan grup memakai joined_at: anggota baru tidak melihat
-    pesan yang terkirim sebelum ia join.
+    The group membership filter uses joined_at: a new member does not see
+    messages sent before they joined.
     """
     rows = conn.execute(
         """SELECT m.id, m.msg_type, m.content, m.file_id, m.created_at,

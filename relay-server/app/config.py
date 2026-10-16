@@ -1,4 +1,4 @@
-"""Konfigurasi server dari environment / file .env."""
+"""Server configuration from the environment / .env file."""
 import secrets
 from pathlib import Path
 
@@ -21,29 +21,29 @@ class Settings(BaseSettings):
     rate_limit_default: str = "120/minute"
     rate_limit_login: str = "10/minute"
 
-    # Validasi unggahan
-    max_storage_mb_per_agent: int = Field(default=0, ge=0)  # 0 = tanpa kuota
-    strict_mime_match: bool = False  # True = tolak kalau ekstensi & isi tidak cocok
+    # Upload validation
+    max_storage_mb_per_agent: int = Field(default=0, ge=0)  # 0 = no quota
+    strict_mime_match: bool = False  # True = reject if extension & content do not match
 
-    # Unggahan berpotong (chunked) & resumable
-    chunk_mb: int = Field(default=5, ge=1, le=64)  # ukuran maksimal satu chunk
-    chunk_session_hours: int = Field(default=24, ge=1)  # TTL sesi unggah nyasar
-    max_chunked_mb: int = Field(default=512, ge=1)  # batas total unggahan berpotong
+    # Chunked & resumable uploads
+    chunk_mb: int = Field(default=5, ge=1, le=64)  # maximum size of a single chunk
+    chunk_session_hours: int = Field(default=24, ge=1)  # TTL for stray upload sessions
+    max_chunked_mb: int = Field(default=512, ge=1)  # total limit for chunked uploads
 
-    # Keamanan token
+    # Token security
     token_grace_minutes: int = Field(default=5, ge=0, le=1440)
     audit_log_retention_days: int = Field(default=90, ge=1)
 
-    # Latensi: long polling & SSE (opsional; polling biasa tetap jadi fallback)
+    # Latency: long polling & SSE (optional; regular polling remains the fallback)
     long_poll_enabled: bool = True
     long_poll_max_seconds: int = Field(default=25, ge=0, le=60)
     sse_enabled: bool = True
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)
 
-    # Dashboard admin
+    # Admin dashboard
     dashboard_password: str = "123456"
     session_hours: int = Field(default=24, ge=1, le=8760)
-    cookie_secure: bool = False  # True kalau dashboard dilayani lewat HTTPS
+    cookie_secure: bool = False  # True if the dashboard is served over HTTPS
 
     @property
     def data_dir(self) -> Path:
@@ -51,8 +51,8 @@ class Settings(BaseSettings):
 
     @property
     def server_epoch(self) -> str:
-        """Identitas instance database. Client menyimpannya; kalau berubah
-        (DB di-reset), cursor since_id lama tidak bisa dipercaya lagi."""
+        """Database instance identity. Clients store it; if it changes
+        (DB reset), old since_id cursors can no longer be trusted."""
         path = self.data_dir / "server_epoch"
         if path.exists():
             return path.read_text(encoding="utf-8").strip()

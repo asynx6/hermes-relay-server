@@ -1,4 +1,4 @@
-"""Model Pydantic untuk request body dan response."""
+"""Pydantic models for request bodies and responses."""
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -10,7 +10,7 @@ GROUP_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{2,31}$"
 UUID4_PATTERN = (
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
-# ID publik: ag_<10 hex> untuk agent, gr_<10 hex> untuk grup.
+# Public IDs: ag_<10 hex> for agents, gr_<10 hex> for groups.
 PUBLIC_ID_PATTERN = r"^(ag|gr)_[0-9a-f]{10}$"
 
 
@@ -18,9 +18,9 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., pattern=AGENT_NAME_PATTERN, max_length=32)
     description: str | None = Field(default=None, max_length=500)
     metadata: dict | None = None
-    # Nonce idempotency registrasi: kalau respons 201 hilang (timeout),
-    # retry dengan nonce yang sama mengembalikan secret yang sama alih-alih
-    # 409 "nama sudah dipakai" yang membakar nama agent.
+    # Registration idempotency nonce: if the 201 response is lost (timeout),
+    # retrying with the same nonce returns the same secret instead of a
+    # 409 "name already taken" that burns the agent name.
     registration_nonce: str | None = Field(default=None, min_length=8, max_length=64)
 
 
@@ -31,13 +31,13 @@ TASK_STATUSES = ("pending", "running", "done", "failed", "cancelled")
 class SendMessageRequest(BaseModel):
     client_msg_id: str = Field(..., pattern=UUID4_PATTERN)
     target_type: Literal["direct", "group"]
-    # Alamat selalu pasangan (ID, nama) — server menolak kalau tidak cocok.
+    # Address is always an (ID, name) pair — the server rejects a mismatch.
     target_id: str = Field(..., pattern=PUBLIC_ID_PATTERN)
     target_name: str = Field(..., min_length=3, max_length=32)
     content: str = Field(..., min_length=1, max_length=8000)
     msg_type: Literal["text", "file", "task", "result", "event"] = "text"
-    # Wajib untuk msg_type task/result: ID tugas yang menghubungkan
-    # permintaan dan balasan (pola RPC ringan).
+    # Required for msg_type task/result: the task ID linking the
+    # request and the reply (lightweight RPC pattern).
     task_id: str | None = Field(default=None, min_length=8, max_length=64)
     task_status: Literal["pending", "running", "done", "failed", "cancelled"] | None = None
     reply_to: int | None = None
@@ -52,7 +52,7 @@ class SendMessageRequest(BaseModel):
 
 
 class AckRequest(BaseModel):
-    """Konfirmasi penerimaan pesan oleh agent penerima."""
+    """Confirmation of message receipt by the receiving agent."""
 
     message_ids: list[int] = Field(..., min_length=1, max_length=200)
     status: Literal["delivered", "read"] = "delivered"
@@ -63,11 +63,11 @@ class CreateGroupRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
 
 
-# --- keamanan token ---------------------------------------------------------
+# --- token security ---------------------------------------------------------
 
 
 class CreateTokenRequest(BaseModel):
-    """Token sekunder dengan scope terbatas."""
+    """Secondary token with limited scope."""
 
     scopes: list[str] = Field(..., min_length=1, max_length=16)
     label: str | None = Field(default=None, max_length=64)
@@ -78,16 +78,16 @@ class CreateTokenRequest(BaseModel):
         unknown = [s for s in self.scopes if s not in KNOWN_SCOPES]
         if unknown:
             raise ValueError(f"scope tidak dikenal: {', '.join(unknown)}")
-        # Dedupe sambil mempertahankan urutan.
+        # Dedupe while preserving order.
         self.scopes = list(dict.fromkeys(self.scopes))
         return self
 
 
-# --- kelola grup lanjutan ---------------------------------------------------
+# --- advanced group management ---------------------------------------------------
 
 
 class JoinGroupRequest(BaseModel):
-    """Join pakai join_code (opsional; kalau kosong, grup harus terbuka)."""
+    """Join using a join_code (optional; if empty, the group must be open)."""
 
     join_code: str | None = Field(default=None, min_length=4, max_length=64)
 
@@ -97,20 +97,20 @@ class SetRoleRequest(BaseModel):
 
 
 class SetJoinCodeRequest(BaseModel):
-    """Atur/ganti join_code grup.
+    """Set/change the group's join_code.
 
-    `join_code=None` -> server membuatkan kode acak. Untuk mengosongkan
-    (grup kembali terbuka), pakai `DELETE /groups/{name}/join-code`.
+    `join_code=None` -> the server generates a random code. To clear it
+    (the group becomes open again), use `DELETE /groups/{name}/join-code`.
     """
 
     join_code: str | None = Field(default=None, min_length=4, max_length=64)
 
 
-# --- unggahan berpotong (chunked) ------------------------------------------
+# --- chunked uploads ------------------------------------------
 
 
 class ChunkedUploadInitRequest(BaseModel):
-    """Buka sesi unggah berpotong. Client sudah menghitung SHA-256 total."""
+    """Open a chunked upload session. The client has already computed the total SHA-256."""
 
     original_name: str = Field(..., min_length=1, max_length=255)
     total_size: int = Field(..., ge=1)

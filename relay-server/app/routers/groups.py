@@ -1,13 +1,13 @@
-"""Kelola grup: buat, daftar, join (dengan join_code), leave, anggota, role.
+"""Group management: create, list, join (with join_code), leave, members, role.
 
-Model keamanan grup:
-- Pembuat grup otomatis menjadi **admin**.
-- Admin bisa mengatur `join_code`, mengangkat/menurunkan role anggota, dan
-  mengeluarkan (kick) anggota.
-- Grup tanpa `join_code` bersifat terbuka (siapa pun yang terautentikasi
-  boleh join) — ini menjaga kompatibilitas dengan alur lama.
-- Admin terakhir tidak bisa keluar atau diturunkan sebelum ada admin lain,
-  supaya grup tidak pernah kehilangan pengelola.
+Group security model:
+- The group creator automatically becomes an **admin**.
+- Admins can set the `join_code`, promote/demote member roles, and
+  remove (kick) members.
+- A group without a `join_code` is open (any authenticated agent may join) —
+  this preserves compatibility with the old flow.
+- The last admin cannot leave or be demoted before another admin exists,
+  so a group never loses its manager.
 """
 import secrets
 import sqlite3
@@ -68,10 +68,10 @@ def create_group(
     request: Request,
     agent=Depends(require_scope("groups:write")),
 ):
-    """Buat grup. Pembuat otomatis menjadi admin; join_code opsional."""
+    """Create a group. The creator automatically becomes admin; join_code is optional."""
     conn = connect()
     try:
-        begin_immediate(conn)  # cek-tulis harus atomik
+        begin_immediate(conn)  # check-write must be atomic
         clash = _group_by_name(conn, body.name)
         if clash:
             conn.commit()
@@ -104,7 +104,7 @@ def create_group(
 @router.get("/groups")
 @limiter.limit(lambda: settings.rate_limit_default)
 def list_groups(request: Request, agent=Depends(require_scope("groups:read"))):
-    """Direktori grup: semua grup + status keanggotaan dan role pemanggil."""
+    """Group directory: all groups + the caller's membership status and role."""
     conn = connect()
     try:
         rows = conn.execute(
@@ -144,7 +144,7 @@ def list_groups(request: Request, agent=Depends(require_scope("groups:read"))):
 @router.get("/groups/{name}/members")
 @limiter.limit(lambda: settings.rate_limit_default)
 def list_members(name: str, request: Request, agent=Depends(require_scope("groups:read"))):
-    """Daftar anggota grup + role. Hanya anggota yang boleh melihat."""
+    """List of group members + role. Only members may view."""
     conn = connect()
     try:
         group = _group_by_name(conn, name)
@@ -187,7 +187,7 @@ def join_group(
     body: JoinGroupRequest | None = None,
     agent=Depends(require_scope("groups:write")),
 ):
-    """Gabung grup. Kalau grup punya join_code, kode itu wajib cocok."""
+    """Join a group. If the group has a join_code, that code must match."""
     supplied_code = body.join_code if body else None
     conn = connect()
     try:
@@ -244,8 +244,8 @@ def join_group(
 @router.post("/groups/{name}/leave")
 @limiter.limit(lambda: settings.rate_limit_default)
 def leave_group(name: str, request: Request, agent=Depends(require_scope("groups:write"))):
-    """Keluar dari grup. Admin terakhir tidak boleh keluar selama masih ada
-    anggota lain (angkat admin lain dulu)."""
+    """Leave the group. The last admin may not leave while other members
+    remain (promote another admin first)."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -297,7 +297,7 @@ def kick_member(
     request: Request,
     agent=Depends(require_scope("groups:admin")),
 ):
-    """Keluarkan anggota dari grup (admin saja)."""
+    """Remove a member from the group (admin only)."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -353,7 +353,7 @@ def set_role(
     request: Request,
     agent=Depends(require_scope("groups:admin")),
 ):
-    """Ubah role anggota (admin saja). Admin terakhir tidak bisa diturunkan."""
+    """Change a member's role (admin only). The last admin cannot be demoted."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -405,10 +405,10 @@ def set_join_code(
     request: Request,
     agent=Depends(require_scope("groups:admin")),
 ):
-    """Atur/ganti/kosongkan join_code grup (admin saja).
+    """Set/change/clear the group's join_code (admin only).
 
-    `join_code` tidak di-set -> grup terbuka. `join_code` di-set -> join
-    wajib menyertakan kode yang cocok. Kirim `null` untuk mengosongkan.
+    `join_code` not set -> the group is open. `join_code` set -> join
+    must include the matching code. Send `null` to clear it.
     """
     conn = connect()
     try:
@@ -445,7 +445,7 @@ def set_join_code(
 def clear_join_code(
     name: str, request: Request, agent=Depends(require_scope("groups:admin"))
 ):
-    """Kosongkan join_code sehingga grup kembali terbuka (admin saja)."""
+    """Clear the join_code so the group becomes open again (admin only)."""
     conn = connect()
     try:
         begin_immediate(conn)

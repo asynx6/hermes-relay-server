@@ -1,6 +1,6 @@
-"""Inisialisasi database relay dari schema.sql.
+"""Initialize the relay database from schema.sql.
 
-Pakai:
+Usage:
     python scripts/init_db.py
 """
 import sys

@@ -1,16 +1,16 @@
-"""Retention + penyapuan: hapus pesan/file lama, staging nyasar, file orphan.
+"""Retention + sweeping: delete old messages/files, stray staging, orphan files.
 
-Dijalankan via cron.
+Run via cron.
 
-Contoh cron (tiap hari pukul 03:00):
+Cron example (daily at 03:00):
     0 3 * * * cd /opt/relay-server && . venv/bin/activate && python scripts/cleanup.py
 
-Pakai:
-    python scripts/cleanup.py                 # pakai RETENTION_DAYS dari .env
-    python scripts/cleanup.py --days 14       # override masa retensi
-    python scripts/cleanup.py --staging-hours 6  # umur staging sebelum disapu
-    python scripts/cleanup.py --orphan-min-age-hours 1  # jangan sapu orphan muda
-    python scripts/cleanup.py --dry-run       # hanya tampilkan rencana
+Usage:
+    python scripts/cleanup.py                 # use RETENTION_DAYS from .env
+    python scripts/cleanup.py --days 14       # override the retention period
+    python scripts/cleanup.py --staging-hours 6  # staging age before sweeping
+    python scripts/cleanup.py --orphan-min-age-hours 1  # do not sweep young orphans
+    python scripts/cleanup.py --dry-run       # only print the plan
 """
 import argparse
 import shutil
@@ -31,9 +31,9 @@ OLD_SQL = "created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)"
 def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: int) -> None:
     conn = connect()
     try:
-        # 1) Referensi reply_to ke pesan lama harus dilepas dulu; kalau tidak,
-        #    DELETE gagal karena foreign_keys=ON dan transaksi rollback
-        #    SETELAH file fisik terhapus (DB dan disk jadi tidak sinkron).
+        # 1) reply_to references to old messages must be released first; otherwise
+        #    the DELETE fails because foreign_keys=ON and the transaction rolls back
+        #    AFTER the physical files are deleted (DB and disk end up out of sync).
         old_ids = f"SELECT id FROM messages WHERE {OLD_SQL}"
         n_refs = conn.execute(
             f"SELECT COUNT(*) FROM messages WHERE reply_to IN ({old_ids})",
@@ -48,7 +48,7 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
                 )
                 conn.commit()
 
-        # 2) File lama: kumpulkan, commit penanda deleted_at, BARU hapus fisik.
+        # 2) Old files: collect, commit the deleted_at marker, and ONLY THEN delete physically.
         old_files = conn.execute(
             "SELECT file_id, stored_name FROM file_logs "
             "WHERE deleted_at IS NULL AND uploaded_at < "
@@ -65,12 +65,12 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
                 "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)",
                 (f"-{days} days",),
             )
-            conn.commit()  # kalau langkah fisik gagal, DB tetap konsisten
+            conn.commit()  # if the physical step fails, the DB stays consistent
             for f in old_files:
                 (settings.filemanager_dir / f["stored_name"]).unlink(missing_ok=True)
                 print(f"  fisik {f['stored_name']} dihapus")
 
-        # 3) Pesan lama: hapus barisnya.
+        # 3) Old messages: delete their rows.
         old_msgs = conn.execute(
             f"SELECT COUNT(*) FROM messages WHERE {OLD_SQL}", (f"-{days} days",)
         ).fetchone()[0]
@@ -86,7 +86,7 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
     if dry_run:
         print("(dry-run: perubahan database tidak disimpan)")
 
-    # 4) Staging nyasar: proses mati di tengah unggahan meninggalkan .part.
+    # 4) Stray staging: a process dying mid-upload leaves .part files behind.
     staging_dir = settings.filemanager_dir / STAGING_DIRNAME
     if staging_dir.is_dir():
         cutoff = time.time() - staging_hours * 3600
@@ -96,8 +96,8 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
                 if not dry_run:
                     part.unlink(missing_ok=True)
 
-    # 5) Orphan: file tanpa baris file_logs. Umur minimum supaya file yang
-    #    SEDANG di-upload (rename sudah terjadi, commit belum) tidak tersapu.
+    # 5) Orphan: files without a file_logs row. A minimum age so that files
+    #    CURRENTLY being uploaded (rename done, commit not yet) are not swept.
     if settings.filemanager_dir.is_dir():
         conn = connect()
         try:
@@ -112,12 +112,12 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
             if not p.is_file() or p.name == ".gitkeep" or p.name in known:
                 continue
             if p.stat().st_mtime >= age_cutoff:
-                continue  # masih muda: mungkin sedang di-commit
+                continue  # still young: may be mid-commit
             print(f"orphan {p.name} -> hapus (tanpa baris file_logs)")
             if not dry_run:
                 p.unlink(missing_ok=True)
 
-    # 6) Sesi unggah berpotong yang ditinggalkan: tandai aborted + buang chunk.
+    # 6) Abandoned truncated upload sessions: mark aborted + discard chunks.
     stale_ids: list[str] = []
     conn = connect()
     try:
@@ -136,7 +136,7 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
             )
             conn.commit()
 
-        # 6b) Direktori chunk tanpa sesi aktif (sisa crash setelah init).
+        # 6b) Chunk directories without an active session (leftovers after a crash post-init).
         if staging_dir.is_dir():
             active = {
                 r["upload_id"]
@@ -158,7 +158,7 @@ def cleanup(days: int, dry_run: bool, staging_hours: int, orphan_min_age_hours: 
                     print(f"staging sesi {d.name} -> hapus (tanpa sesi aktif)")
                     shutil.rmtree(d, ignore_errors=True)
 
-    # 7) Pangkas audit log yang lebih tua dari retensi.
+    # 7) Prune audit log entries older than the retention period.
     conn = connect()
     try:
         if dry_run:

@@ -1,4 +1,4 @@
-"""Sanitasi teks tidak tepercaya sebelum ditampilkan (cegah ANSI injection)."""
+"""Sanitize untrusted text before display (prevent ANSI injection)."""
 import sys
 from pathlib import Path
 

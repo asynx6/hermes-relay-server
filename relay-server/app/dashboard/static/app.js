@@ -1,14 +1,14 @@
-/* Hermes Relay Dashboard — aplikasi vanilla JS.
- * Semua request pakai cookie sesi (credentials same-origin). Response 401
- * berarti sesi habis/tidak valid: UI kembali ke halaman login.
+/* Hermes Relay Dashboard — vanilla JS app.
+ * All requests use the session cookie (credentials same-origin). A 401
+ * response means the session expired/invalid: the UI returns to the login page.
  */
 
 const API = "/api/v1/dashboard";
 const state = {
   view: "agents",
   agents: [],
-  agentIds: {},    // nama -> agent_id
-  groupIds: {},    // nama -> group_id
+  agentIds: {},    // name -> agent_id
+  groupIds: {},    // name -> group_id
   selectedGroup: null,
   selectedPair: null,
   autoLogoutTimer: null,
@@ -81,7 +81,7 @@ async function ensureAgents() {
   return agents.map((a) => a.name);
 }
 
-/* ---------------- tema ---------------- */
+/* ---------------- theme ---------------- */
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -95,7 +95,7 @@ function initTheme() {
   applyTheme(saved || (prefersDark ? "dark" : "light"));
 }
 
-/* ---------------- login / sesi ---------------- */
+/* ---------------- login / session ---------------- */
 
 function showLogin(message) {
   clearTimeout(state.autoLogoutTimer);
@@ -110,7 +110,7 @@ function showLogin(message) {
 function showApp(sessionSeconds) {
   $("login-view").classList.add("hidden");
   $("app-view").classList.remove("hidden");
-  // Auto-logout tepat saat token kedaluwarsa (default 24 jam).
+  // Auto-logout exactly when the token expires (default 24 hours).
   clearTimeout(state.autoLogoutTimer);
   state.autoLogoutTimer = setTimeout(
     () => showLogin("Sesi 24 jam berakhir. Silakan masuk lagi."),
@@ -151,7 +151,7 @@ $("logout-btn").addEventListener("click", async () => {
   try {
     await api("/logout", { method: "POST", body: "{}" });
   } catch {
-    /* tetap keluar dari UI */
+    /* still log out of the UI */
   }
   showLogin("");
 });
@@ -160,7 +160,7 @@ $("theme-toggle").addEventListener("click", () => {
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 });
 
-/* ---------------- navigasi ---------------- */
+/* ---------------- navigation ---------------- */
 
 const VIEWS = ["agents", "groups", "direct", "files", "audit", "help", "password"];
 
@@ -186,7 +186,7 @@ document.querySelectorAll(".nav-btn").forEach((b) =>
 async function loadAgents() {
   try {
     const { agents } = await api("/agents");
-    state.agents = agents;  // segar untuk dropdown pengirim
+    state.agents = agents;  // fresh for the sender dropdown
     state.agentIds = Object.fromEntries(agents.map((a) => [a.name, a.agent_id]));
     const tbody = $("agents-body");
     if (!agents.length) {
@@ -210,7 +210,7 @@ async function loadAgents() {
   }
 }
 
-/* ---------------- grup ---------------- */
+/* ---------------- groups ---------------- */
 
 async function loadGroups() {
   try {
@@ -292,7 +292,7 @@ async function openGroup(name) {
 
 async function loadGroupThread(name) {
   const data = await api(`/groups/${encodeURIComponent(name)}/messages`);
-  // Daftar anggota diambil dari endpoint /groups (biar UI tahu siapa yang boleh kirim).
+  // The member list comes from the /groups endpoint (so the UI knows who may send).
   const { groups } = await api("/groups");
   const g = groups.find((x) => x.name === name);
   return { messages: data.messages, members: g ? g.members : [] };
@@ -344,7 +344,7 @@ $("group-composer").addEventListener("submit", async (e) => {
   }
 });
 
-/* ---------------- privat ---------------- */
+/* ---------------- private ---------------- */
 
 async function loadPairs() {
   try {
@@ -438,7 +438,7 @@ $("direct-composer").addEventListener("submit", async (e) => {
     });
     input.value = "";
     await openPair(state.selectedPair.split("|"));
-    // Segarkan daftar pasangan (preview dan urutan bisa berubah).
+    // Refresh the pair list (the preview and order may change).
     const { conversations } = await api("/conversations");
     renderPairsList(conversations);
   } catch (err) {
@@ -596,7 +596,7 @@ async function loadAudit() {
 $("audit-refresh").addEventListener("click", loadAudit);
 $("audit-filter").addEventListener("change", loadAudit);
 
-/* ---------------- ganti password ---------------- */
+/* ---------------- change password ---------------- */
 
 $("password-form").addEventListener("submit", async (e) => {
   e.preventDefault();

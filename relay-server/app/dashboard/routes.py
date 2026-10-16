@@ -1,8 +1,8 @@
-"""Endpoint dashboard admin: monitoring agent, pesan, dan file manager.
+"""Admin dashboard endpoints: agent monitoring, messages, and file manager.
 
-Semua endpoint di router ini butuh sesi JWT (cookie `hermes_dashboard`),
-kecuali `/login` dan `/logout`. Tidak ada CORS: dashboard hanya untuk browser
-yang mengakses server langsung.
+All endpoints in this router require a JWT session (cookie `hermes_dashboard`),
+except `/login` and `/logout`. No CORS: the dashboard is only for browsers
+that access the server directly.
 """
 import time
 import uuid
@@ -32,7 +32,7 @@ SESSION_SECONDS = settings.session_hours * 3600
 
 
 def require_session(request: Request) -> None:
-    """Cek cookie JWT; tolak dengan 401 kalau tidak ada atau kedaluwarsa."""
+    """Check the JWT cookie; reject with 401 if missing or expired."""
     token = request.cookies.get(auth.COOKIE_NAME)
     if not token or auth.verify_token(token) is None:
         raise api_error(401, "UNAUTHORIZED", "Sesi tidak valid atau sudah berakhir.")
@@ -47,7 +47,7 @@ def _client_ip(request: Request) -> str | None:
 
 def _audit(request: Request, action: str, *, target: str | None = None,
            detail: dict | None = None, result: str = "ok") -> None:
-    """Catat aksi dashboard. Kegagalan audit tidak menggagalkan aksi utama."""
+    """Record a dashboard action. Audit failure does not fail the main action."""
     conn = connect()
     try:
         audit_service.safe_record(
@@ -118,7 +118,7 @@ def change_password(body: ChangePasswordRequest, request: Request, _=session_dep
     except auth.AuthError as exc:
         _audit(request, audit_service.ACTION_CHANGE_PASSWORD, result="denied")
         raise api_error(400, "BAD_REQUEST", str(exc))
-    # Ganti password menaikkan epoch JWT: semua sesi lama langsung ditolak.
+    # Changing the password bumps the JWT epoch: all old sessions are immediately rejected.
     _audit(request, audit_service.ACTION_CHANGE_PASSWORD)
     return {"status": "ok", "data": {"message": "Password diperbarui."}}
 
@@ -157,13 +157,13 @@ def list_agents(request: Request, _=session_dep):
 
 
 # ---------------------------------------------------------------------------
-# Chat privat
+# Private chat
 # ---------------------------------------------------------------------------
 
 @router.get("/conversations")
 @limiter.limit(lambda: settings.rate_limit_default)
 def list_conversations(request: Request, _=session_dep):
-    """Daftar pasangan agent yang pernah berchat langsung."""
+    """List of agent pairs that have ever chatted directly."""
     conn = connect()
     try:
         pairs = conn.execute(
@@ -186,7 +186,7 @@ def list_conversations(request: Request, _=session_dep):
             ).fetchall()
             name_map = {n["name"] for n in names}
             if len(name_map) < 2:
-                continue  # salah satu agent dihapus
+                continue  # one of the agents was deleted
             last = conn.execute(
                 "SELECT content, msg_type, created_at FROM messages WHERE id = ?",
                 (p["last_id"],),
@@ -229,8 +229,8 @@ def conversation_thread(
                   OR (m.sender_id = ? AND m.recipient_id = ?)""",
             (a, b, b, a),
         ).fetchone()["n"]
-        # Ambil jendela terbaru dulu (DESC + OFFSET), lalu balik ke urutan
-        # kronologis supaya UI tetap membaca lama -> baru.
+        # Fetch the most recent window first (DESC + OFFSET), then reverse to
+        # chronological order so the UI still reads old -> new.
         rows = conn.execute(
             """SELECT m.id, m.msg_type, m.content, m.created_at, m.reply_to,
                       s.name AS sender, r.name AS recipient,
@@ -274,7 +274,7 @@ def conversation_thread(
 
 
 # ---------------------------------------------------------------------------
-# Chat grup
+# Group chat
 # ---------------------------------------------------------------------------
 
 def _resolve_agent_row(conn, name: str):
@@ -290,7 +290,7 @@ def _resolve_agent_row(conn, name: str):
 @router.post("/send-message")
 @limiter.limit(lambda: settings.rate_limit_default)
 def send_message(body: SendMessageRequest, request: Request, _=session_dep):
-    """Kirim pesan sebagai agent pilihan admin (lihat catatan di schemas)."""
+    """Send a message as an admin-chosen agent (see the note in schemas)."""
     conn = connect()
     try:
         begin_immediate(conn)
@@ -319,7 +319,7 @@ def send_message(body: SendMessageRequest, request: Request, _=session_dep):
             content=body.content,
             reply_to=None,
         )
-        # Aksi paling sensitif di dashboard: kirim atas nama agent lain.
+        # The most sensitive action in the dashboard: send on behalf of another agent.
         audit_service.record(
             conn,
             actor="dashboard",
@@ -519,7 +519,7 @@ def group_messages(
 # ---------------------------------------------------------------------------
 
 def _file_info(row) -> dict | None:
-    """Metadata file untuk pesan bertipe file (None kalau bukan pesan file)."""
+    """File metadata for file-type messages (None if it is not a file message)."""
     if not row["file_id"]:
         return None
     return {
@@ -599,7 +599,7 @@ def list_files(
 @router.get("/files/{stored_name}/download")
 @limiter.limit(lambda: settings.rate_limit_default)
 def download_file(stored_name: str, request: Request, _=session_dep):
-    # Nama disanitasi supaya tidak bisa dipakai path traversal.
+    # The name is sanitized so it cannot be used for path traversal.
     safe = file_service.sanitize_filename(stored_name)
     stored = (settings.filemanager_dir / safe).resolve()
     if settings.filemanager_dir.resolve() not in stored.parents:
@@ -635,8 +635,8 @@ def download_file(stored_name: str, request: Request, _=session_dep):
 @router.delete("/files/{stored_name}")
 @limiter.limit(lambda: settings.rate_limit_default)
 def delete_file(stored_name: str, request: Request, _=session_dep):
-    """Hapus file dari disk dan tandai deleted_at (pesan tetap ada,
-    unduhan lewat API agent akan mengembalikan 410)."""
+    """Delete the file from disk and mark deleted_at (the message remains,
+    downloads via the agent API will return 410)."""
     safe = file_service.sanitize_filename(stored_name)
     conn = connect()
     try:
@@ -655,8 +655,8 @@ def delete_file(stored_name: str, request: Request, _=session_dep):
             "WHERE file_id = ?",
             (row["file_id"],),
         )
-        # Hardlink dedupe: menghapus satu nama tidak menghapus isi selama
-        # masih ada baris lain yang menunjuk inode yang sama.
+        # Hardlink dedupe: deleting one name does not delete the content as
+        # long as another row still points to the same inode.
         audit_service.record(
             conn,
             actor="dashboard",
@@ -686,7 +686,7 @@ def list_audit(
     actor_type: str | None = Query(default=None, max_length=16),
     _=session_dep,
 ):
-    """Jejak aksi administratif & keamanan (terbaru dulu)."""
+    """Trail of administrative & security actions (newest first)."""
     conn = connect()
     try:
         rows, total = audit_service.recent(

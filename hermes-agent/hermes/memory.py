@@ -1,7 +1,7 @@
-"""Long Memory: SQLite lokal (conversations, files_history, sync_state).
+"""Long Memory: local SQLite (conversations, files_history, sync_state).
 
-Satu koneksi untuk satu proses, mode WAL, busy_timeout supaya tidak
-langsung gagal saat ada akses bersamaan.
+One connection per process, WAL mode, busy_timeout so it does not fail
+immediately when there is concurrent access.
 """
 import sqlite3
 from datetime import datetime, timezone
@@ -65,7 +65,7 @@ def now_iso() -> str:
 class Memory:
     def __init__(self, db_path: str, agent_name: str):
         self.agent_name = agent_name
-        self.server_epoch = None  # diisi dari respons fetch-messages
+        self.server_epoch = None  # filled from the fetch-messages response
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path, timeout=30)
         self.conn.row_factory = sqlite3.Row
@@ -78,7 +78,7 @@ class Memory:
     def close(self) -> None:
         self.conn.close()
 
-    # ---- cursor polling ----
+    # ---- polling cursor ----
 
     def get_last_id(self) -> int:
         row = self.conn.execute(
@@ -94,16 +94,16 @@ class Memory:
         )
         self.conn.commit()
 
-    # ---- pesan masuk ----
+    # ---- incoming messages ----
 
     def save_incoming(self, messages: list[dict], next_id: int) -> list[dict]:
-        """Simpan pesan masuk lalu majukan cursor, dalam satu transaksi.
+        """Save incoming messages then advance the cursor, in one transaction.
 
-        - `remote_message_id UNIQUE` men-dedupe kalau server mengirim ulang
-          pesan yang sama; hanya pesan yang BENAR-BENAR baru (rowcount > 0)
-          yang dikembalikan, supaya handler tidak jalan dua kali.
-        - Cursor hanya naik (MAX), tidak pernah mundur, dan hanya setelah
-          simpan sukses.
+        - `remote_message_id UNIQUE` dedupes if the server resends the same
+          message; only genuinely new messages (rowcount > 0) are returned,
+          so the handler does not run twice.
+        - The cursor only moves forward (MAX), never backward, and only after
+          a successful save.
         """
         new_messages: list[dict] = []
         try:
@@ -129,8 +129,8 @@ class Memory:
                 )
                 if cur.rowcount:
                     new_messages.append(msg)
-            # MAX() supaya cursor tidak pernah mundur (mis. server mengirim
-            # ulang batch lama karena timeout di sisi kita).
+            # MAX() so the cursor never moves backward (e.g. the server resends
+            # an old batch because of a timeout on our side).
             self.conn.execute(
                 "INSERT INTO sync_state (key, value) VALUES ('last_message_id', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = "
@@ -149,15 +149,15 @@ class Memory:
         return new_messages
 
     def server_epoch_matches(self, epoch: str | None) -> bool:
-        """False kalau server_epoch berbeda dari yang terakhir tercatat
-        (tanda database server di-reset — cursor lama tidak lagi valid)."""
+        """False if server_epoch differs from the last recorded one
+        (a sign the server database was reset — the old cursor is no longer valid)."""
         if not epoch:
             return True
         row = self.conn.execute(
             "SELECT value FROM sync_state WHERE key = 'server_epoch'"
         ).fetchone()
         if row is None or not row["value"]:
-            return True  # belum pernah mencatat; anggap cocok
+            return True  # never recorded; assume it matches
         return row["value"] == epoch
 
     def remember_server_epoch(self, epoch: str | None) -> None:
@@ -168,10 +168,10 @@ class Memory:
         )
         self.conn.commit()
 
-    # ---- unduhan pending (retry tiap siklus) ----
+    # ---- pending downloads (retried every cycle) ----
 
     def pending_downloads(self) -> list[sqlite3.Row]:
-        """File yang gagal/tertunda diunduh; dicoba lagi tiap siklus polling."""
+        """Files that failed/were deferred for download; retried every polling cycle."""
         return self.conn.execute(
             "SELECT * FROM files_history WHERE direction = 'download' "
             "AND status = 'pending' ORDER BY id LIMIT 20"
@@ -183,7 +183,7 @@ class Memory:
         self, scope: str, peer: str, peer_id: str, content: str,
         client_msg_id: str, msg_type: str = "text", file_id: str | None = None,
     ) -> int:
-        """Catat pesan keluar sebagai pending (siap dikirim di siklus berikutnya)."""
+        """Record an outgoing message as pending (ready to send in the next cycle)."""
         cur = self.conn.execute(
             """INSERT INTO conversations
                  (client_msg_id, direction, scope, peer, peer_id, sender, msg_type,
@@ -211,7 +211,7 @@ class Memory:
         self.conn.commit()
 
     def mark_failed(self, row_id: int) -> None:
-        """Naikkan retry_count; lewat batas -> failed permanen."""
+        """Increment retry_count; past the limit -> permanently failed."""
         self.conn.execute(
             "UPDATE conversations SET retry_count = retry_count + 1, "
             "status = CASE WHEN retry_count + 1 >= ? THEN 'failed' ELSE 'pending' END "
@@ -220,7 +220,7 @@ class Memory:
         )
         self.conn.commit()
 
-    # ---- riwayat file ----
+    # ---- file history ----
 
     def record_file(
         self, file_id: str | None, direction: str, scope: str, peer: str,

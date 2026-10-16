@@ -1,17 +1,17 @@
-"""Autentikasi dashboard admin: password + JWT.
+"""Admin dashboard authentication: password + JWT.
 
 Password:
-- Kalau `DASHBOARD_PASSWORD` di-set di environment, nilai itu dipakai
-  (pilihan operator, bahkan kalau lemah).
-- Kalau tidak di-set dan belum ada file auth, password **acak** dibuat,
-  dicetak sekali ke stdout, lalu hanya hash PBKDF2-nya yang disimpan di
-  `data/dashboard_auth.json` (permission 0600). Tidak ada default lemah.
+- If `DASHBOARD_PASSWORD` is set in the environment, that value is used
+  (operator's choice, even if weak).
+- If it is not set and no auth file exists, a **random** password is created,
+  printed once to stdout, and only its PBKDF2 hash is stored in
+  `data/dashboard_auth.json` (permission 0600). No weak default.
 
-Sesi: JWT HS256 di cookie HttpOnly. Token membawa klaim `epoch`; setiap
-ganti password menaikkan epoch di `data/dashboard_jwt_epoch`, sehingga
-semua sesi lama langsung ditolak (kontrol pencabutan tanpa denylist).
-Secret JWT persisten di `data/dashboard_jwt_secret` (restart tidak
-membatalkan sesi yang belum kedaluwarsa).
+Session: HS256 JWT in an HttpOnly cookie. The token carries an `epoch` claim;
+each password change bumps the epoch in `data/dashboard_jwt_epoch`, so all
+old sessions are immediately rejected (revocation control without a denylist).
+The JWT secret is persistent in `data/dashboard_jwt_secret` (a restart does
+not invalidate sessions that have not yet expired).
 """
 import hashlib
 import hmac
@@ -33,7 +33,7 @@ COOKIE_NAME = "hermes_dashboard"
 
 
 class AuthError(Exception):
-    """Password lama salah atau kredensial tidak valid."""
+    """Old password is wrong or the credentials are invalid."""
 
 
 def _write_private(path: Path, content: str) -> None:
@@ -42,11 +42,11 @@ def _write_private(path: Path, content: str) -> None:
     try:
         path.chmod(0o600)
     except OSError:
-        pass  # Windows: chmod terbatas; file tetap di direktori data lokal.
+        pass  # Windows: chmod is limited; the file still stays in the local data directory.
 
 
 def _load_record() -> dict:
-    """Ambil record password; buat dari env/password acak kalau belum ada."""
+    """Get the password record; create it from env/random password if absent."""
     path = settings.data_dir / AUTH_FILENAME
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -60,7 +60,7 @@ def _load_record() -> dict:
     record = _new_record(password)
     _write_private(path, json.dumps(record))
     if generated:
-        # Satu-satunya kali password asli terlihat.
+        # The only time the plaintext password is ever visible.
         print(
             "\n" + "=" * 64 + "\n"
             "PASSWORD DASHBOARD DIBUAT OTOMATIS (tampil sekali saja):\n"
@@ -94,7 +94,7 @@ def verify_password(password: str) -> bool:
 
 
 def change_password(old_password: str, new_password: str) -> None:
-    """Ganti password. Gagal dengan AuthError kalau password lama salah."""
+    """Change the password. Fails with AuthError if the old password is wrong."""
     if not verify_password(old_password):
         raise AuthError("Password lama tidak sesuai.")
     if len(new_password) < 6:
@@ -104,10 +104,10 @@ def change_password(old_password: str, new_password: str) -> None:
     _write_private(
         settings.data_dir / AUTH_FILENAME, json.dumps(_new_record(new_password))
     )
-    _bump_epoch()  # semua sesi lama langsung tidak valid
+    _bump_epoch()  # all old sessions become invalid immediately
 
 
-# --- epoch sesi (pencabutan token) ---
+# --- session epoch (token revocation) ---
 
 def _epoch() -> int:
     path = settings.data_dir / JWT_EPOCH_FILENAME
@@ -133,7 +133,7 @@ def _jwt_secret() -> str:
 
 
 def issue_token() -> tuple[str, int]:
-    """Buat JWT sesi dashboard. Kembalikan (token, exp_unix)."""
+    """Create a dashboard session JWT. Return (token, exp_unix)."""
     now = int(time.time())
     exp = now + settings.session_hours * 3600
     token = jwt.encode(
@@ -150,5 +150,5 @@ def verify_token(token: str) -> dict | None:
     except jwt.PyJWTError:
         return None
     if payload.get("epoch") != _epoch():
-        return None  # dibatalkan (mis. password diganti)
+        return None  # revoked (e.g. password changed)
     return payload

@@ -1,18 +1,18 @@
-"""Autentikasi & otorisasi: secret, token ber-scope, dependency agent.
+"""Authentication & authorization: secrets, scoped tokens, agent dependency.
 
-Tiga jenis kredensial diterima:
+Three kinds of credentials are accepted:
 
-1. **Token utama** agent (`agents.secret_hash`) — akses penuh (scope `*`).
-   Dibuat saat registrasi, diputar lewat `POST /rotate-token`.
-2. **Token sekunder** (`agent_tokens`) — dibuat eksplisit dengan daftar scope
-   terbatas, bisa dicabut per token.
-3. **Kunci lama dalam jendela grace** (`token_rotation_grace`) — hash kunci
-   yang baru saja dirotasi tetap diterima sampai grace habis, supaya client
-   yang sedang berjalan bisa menukar kunci tanpa putus.
+1. **Primary agent token** (`agents.secret_hash`) — full access (scope `*`).
+   Created at registration, rotated via `POST /rotate-token`.
+2. **Secondary token** (`agent_tokens`) — explicitly created with a limited
+   scope list, revocable per token.
+3. **Old key within the grace window** (`token_rotation_grace`) — the hash of
+   a key that was just rotated is still accepted until the grace period ends,
+   so a running client can swap the key without interruption.
 
-`get_current_agent` mengembalikan **dict** (bukan sqlite3.Row) supaya bisa
-membawa `scopes`; seluruh pemanggil memakai akses `agent["..."]` sehingga
-perubahan ini transparan.
+`get_current_agent` returns a **dict** (not sqlite3.Row) so it can carry
+`scopes`; every caller uses `agent["..."]` access, so this change is
+transparent.
 """
 import hashlib
 import hmac
@@ -28,7 +28,7 @@ from .config import settings
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
-# Scope yang dikenali. Token utama memakai "*" (akses penuh).
+# Recognized scopes. The primary token uses "*" (full access).
 ALL_SCOPES = "*"
 KNOWN_SCOPES = (
     "messages:read",
@@ -43,7 +43,7 @@ KNOWN_SCOPES = (
 
 
 def api_error(status_code: int, code: str, message: str) -> HTTPException:
-    """HTTPException dengan detail terstruktur; di-format envelope oleh handler di main.py."""
+    """HTTPException with structured detail; the envelope is formatted by the handler in main.py."""
     return HTTPException(
         status_code=status_code,
         detail={"status": "error", "code": code, "message": message},
@@ -51,7 +51,7 @@ def api_error(status_code: int, code: str, message: str) -> HTTPException:
 
 
 def generate_secret() -> str:
-    """Secret per-agent. Entropi 256 bit, SHA-256 cukup untuk disimpan sebagai hash."""
+    """Per-agent secret. 256-bit entropy; SHA-256 is enough to store as a hash."""
     return "hsk_" + secrets.token_urlsafe(32)
 
 
@@ -82,7 +82,7 @@ def get_current_agent(
     hashed = hash_secret(credentials.credentials)
     conn = connect()
     try:
-        # 1) Token utama (akses penuh).
+        # 1) Primary token (full access).
         row = conn.execute(
             "SELECT * FROM agents WHERE secret_hash = ?", (hashed,)
         ).fetchone()
@@ -91,7 +91,7 @@ def get_current_agent(
                 raise api_error(401, "UNAUTHORIZED", "Agent disuspend atau dicabut.")
             return _agent_dict(row, scopes=[ALL_SCOPES], token_id=None)
 
-        # 2) Token sekunder ber-scope.
+        # 2) Secondary scoped token.
         token = conn.execute(
             "SELECT * FROM agent_tokens WHERE secret_hash = ?", (hashed,)
         ).fetchone()
@@ -120,7 +120,7 @@ def get_current_agent(
                 owner, scopes=json.loads(token["scopes"]), token_id=token["token_id"]
             )
 
-        # 3) Kunci lama yang masih dalam jendela grace setelah rotasi.
+        # 3) Old key still within the grace window after rotation.
         grace = conn.execute(
             "SELECT * FROM token_rotation_grace WHERE old_hash = ? "
             "AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
@@ -141,10 +141,10 @@ def get_current_agent(
 
 
 def require_scope(*needed: str):
-    """Dependency factory: token harus punya SEMUA scope yang diminta.
+    """Dependency factory: the token must have ALL requested scopes.
 
-    Token utama (scope `*`) selalu lolos. Penolakan memakai 403 — tokennya
-    valid, hanya izinnya kurang — bukan 401.
+    The primary token (scope `*`) always passes. Rejection uses 403 — the
+    token is valid, it just lacks permission — not 401.
     """
 
     def dependency(agent: dict = Depends(get_current_agent)) -> dict:

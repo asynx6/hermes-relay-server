@@ -1,4 +1,4 @@
-# Data runtime agent (DB lokal, unduhan, instance lock)
+# Agent runtime data (local DB, downloads, instance lock)
 data/*.db
 data/*.db-wal
 data/*.db-shm
@@ -6,8 +6,8 @@ data/hermes.lock
 downloads/*
 !downloads/.gitkeep
 
-# config.json memuat secret_key — JANGAN di-commit.
-# Salin config.example.json menjadi config.json, lalu isi nilainya.
+# config.json holds secret_key — do NOT commit it.
+# Copy config.example.json to config.json, then fill in the values.
 config.json
 
 *.pyc
