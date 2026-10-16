@@ -1,11 +1,14 @@
-"""SQLite access: one connection per operation, WAL, foreign keys enabled."""
+"""SQLite access: one connection per operation, WAL, foreign keys enabled.
+
+Schema creation and upgrades are handled by `app/migrations.py`; this module
+only owns connections and the startup check.
+"""
 import sqlite3
 import time
 from pathlib import Path
 
+from . import migrations
 from .config import settings
-
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
 
 
 def connect() -> sqlite3.Connection:
@@ -38,37 +41,55 @@ def begin_immediate(conn: sqlite3.Connection, max_attempts: int = 8) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
-# Columns added after the first release. `CREATE TABLE IF NOT EXISTS`
-# cannot alter an existing table, so new columns are added here
-# via ALTER TABLE (SQLite does not support IF NOT EXISTS for columns).
-# For heavier changes (type changes, dropping columns), use Alembic.
-_ADDED_COLUMNS: list[tuple[str, str, str]] = [
-    ("group_members", "role", "role TEXT NOT NULL DEFAULT 'member'"),
-    ("groups", "join_code", "join_code TEXT"),
-    ("agents", "token_epoch", "token_epoch INTEGER NOT NULL DEFAULT 0"),
-]
+def init_db(log=None) -> list[migrations.Migration]:
+    """Create or upgrade the schema. Returns the migrations that were applied.
 
-
-def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-    if not existing:
-        return  # table does not exist yet; schema.sql will create it
-    if column not in existing:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-
-
-def migrate(conn: sqlite3.Connection) -> None:
-    """Add missing columns on an older database (idempotent)."""
-    for table, column, ddl in _ADDED_COLUMNS:
-        _ensure_column(conn, table, column, ddl)
-
-
-def init_db() -> None:
-    """Create all tables from schema.sql, then apply column migrations."""
+    Safe to call on every start: already-applied migrations are skipped, and a
+    database created by an older release is upgraded in place without losing
+    data.
+    """
     conn = connect()
     try:
-        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-        migrate(conn)
-        conn.commit()
+        return migrations.run(conn, log=log)
     finally:
         conn.close()
+
+
+def pending_migrations() -> list[migrations.Migration]:
+    """Migrations that would be applied on the next `init_db()`."""
+    conn = connect()
+    try:
+        return migrations.pending(conn)
+    finally:
+        conn.close()
+
+
+def prepare_database(log=print) -> None:
+    """Startup guard: migrate automatically, or refuse to start if disabled.
+
+    With `AUTO_MIGRATE=false` an operator gets an explicit failure listing the
+    pending migrations instead of the server silently running against a schema
+    it does not expect.
+    """
+    todo = pending_migrations()
+    if not todo:
+        init_db(log=log)
+        return
+
+    if not settings.auto_migrate:
+        listing = "\n".join(f"  - {m.label}" for m in todo)
+        raise SystemExit(
+            "REFUSING TO START: the database schema is out of date and "
+            "AUTO_MIGRATE is disabled.\n"
+            f"Pending migrations:\n{listing}\n"
+            "Apply them with:\n"
+            "  python scripts/migrate.py up        # takes a backup first"
+        )
+
+    log(f"Applying {len(todo)} pending database migration(s)...")
+    init_db(log=log)
+
+
+def backup_db(dest: Path | None = None) -> Path:
+    """Convenience re-export of the migration backup helper."""
+    return migrations.backup(dest)

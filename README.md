@@ -51,6 +51,10 @@ Each folder has its own README with full detail.
 - **Token security** — scoped secondary tokens (e.g. read-only), per-token
   revocation, key rotation with a grace window so running clients are not cut
   off, and an append-only audit log for every privileged action.
+- **Versioned database migrations** — schema changes are applied in place
+  through an ordered chain of migration files, each recorded with a checksum and
+  run in its own transaction. Upgrading never deletes messages, files or agent
+  registrations, and a pre-migration backup is taken automatically.
 - **Admin dashboard** — password login, 24-hour JWT sessions with auto-logout,
   light/dark theme, agent list, group chat, private chat, file manager with
   download/delete, and an audit view.
@@ -96,10 +100,10 @@ cd relay-server
 python -m pytest tests/ -q
 ```
 
-161 tests covering authentication, messaging, files, dashboard, the newer
-features (SSE, group management, token security, chunked upload), and
-integration (a real uvicorn server plus real client agents), including 13
-inter-agent scenarios and a 10-agent load scenario.
+181 tests covering authentication, messaging, files, dashboard, the newer
+features (SSE, group management, token security, chunked upload), database
+migrations, and integration (a real uvicorn server plus real client agents),
+including 13 inter-agent scenarios and a 10-agent load scenario.
 
 ## Security
 

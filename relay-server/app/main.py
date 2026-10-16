@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 
 from .config import settings
 from .dashboard.routes import router as dashboard_router
-from .database import init_db
+from .database import prepare_database
 from .ratelimit import limiter
 from .routers import files, groups, messages, register, tokens, uploads
 
@@ -34,10 +34,22 @@ def check_security_defaults() -> None:
         )
 
 
+def _migration_log(message: str) -> None:
+    """Report migrations to both the logger and stdout.
+
+    stdout guarantees an operator running uvicorn directly sees that the schema
+    changed, regardless of the configured log level.
+    """
+    logger.info(message)
+    print(message, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     check_security_defaults()
-    init_db()
+    # Create or upgrade the schema. Raises SystemExit when migrations are
+    # pending and AUTO_MIGRATE is disabled.
+    prepare_database(log=_migration_log)
     settings.filemanager_dir.mkdir(parents=True, exist_ok=True)
     (settings.filemanager_dir / ".staging").mkdir(parents=True, exist_ok=True)
     yield

@@ -29,6 +29,7 @@ Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`.
 | --- | --- | --- |
 | `REGISTRATION_KEY` | `change-me-in-env` | Enrollment key. Must be changed before use |
 | `DB_PATH` | `data/relay.db` | SQLite database location |
+| `AUTO_MIGRATE` | `true` | Apply pending migrations on startup; `false` requires `scripts/migrate.py up` |
 | `FILEMANAGER_DIR` | `filemanager` | File storage directory (outside the web root) |
 | `MAX_UPLOAD_MB` | `25` | Per-file upload size limit |
 | `BLOCKED_EXT` | `.exe,.bat,.cmd,.msi,.dll,.scr,.ps1` | Rejected extensions |
@@ -360,26 +361,88 @@ Both require a proxy that does not buffer responses: the server sends
 `SSE_HEARTBEAT_SECONDS`. Make sure the proxy's `read_timeout` exceeds that
 interval.
 
-## Database schema
+## Database schema and migrations
 
-The full schema is in `schema.sql` (`agents`, `groups`, `group_members`,
-`messages`, `message_receipts`, `registration_replays`, `file_logs`,
-`agent_tokens`, `token_rotation_grace`, `audit_log`, `message_mentions`,
-`upload_sessions`). It is a SQLite schema in WAL mode; columns and relations are
-compatible with MySQL — migrating only requires swapping column types and the
-driver.
+The schema is defined by an ordered chain of migration files in `migrations/`
+(SQLite, WAL mode). Column types and relations map directly onto MySQL, so a
+future port only needs different column types and a different driver.
+
+Tables: `agents`, `groups`, `group_members`, `messages`, `message_receipts`,
+`registration_replays`, `file_logs`, `agent_tokens`, `token_rotation_grace`,
+`audit_log`, `message_mentions`, `upload_sessions`, plus the `schema_migrations`
+ledger that records what has been applied.
 
 Every agent has a public `agent_id` (`ag_<10 hex>`) and every group has a public
 `group_id` (`gr_<10 hex>`); both are used as message addresses alongside the
 name.
 
-**Schema changes.** `CREATE TABLE IF NOT EXISTS` cannot alter an existing table,
-so new columns are added idempotently by `app/database.py::migrate()` (which runs
-on startup and issues `ALTER TABLE ... ADD COLUMN` only when the column is
-missing). For heavier changes (type changes, dropping columns) use Alembic — that
-is still on the list of known limitations.
-
 The core `fetch-messages` query lives in `app/services/message_service.py`.
+
+### Why migrations exist
+
+`CREATE TABLE IF NOT EXISTS` can never change a table that already exists. Before
+this system, a schema change meant deleting `data/relay.db` and losing every
+message, file and agent registration. Migrations replace that: an existing
+database is upgraded **in place**, with its rows untouched.
+
+### Commands
+
+```bash
+python scripts/migrate.py status            # what has run, what is pending
+python scripts/migrate.py up                # apply pending migrations (backs up first)
+python scripts/migrate.py up --dry-run      # show the plan, change nothing
+python scripts/migrate.py up --to 2         # stop at version 2
+python scripts/migrate.py up --no-backup    # skip the pre-migration snapshot
+python scripts/migrate.py schema            # print the DDL produced by the chain
+```
+
+`up` writes a consistent snapshot to `data/backups/relay-<timestamp>.db` before
+touching anything, using the SQLite online backup API — safe to run while the
+server is live, unlike copying the file (which can miss data still in the WAL).
+
+### Behaviour
+
+- **Applied once, recorded.** Each migration is logged in `schema_migrations`
+  with its file checksum and duration. Re-running is a no-op.
+- **Atomic.** Every migration runs in its own transaction. If one fails, that
+  migration is rolled back completely and the ones before it stay applied — the
+  database is never left half-migrated.
+- **Automatic by default.** With `AUTO_MIGRATE=true` the server upgrades the
+  schema on startup and prints each migration it applies. With
+  `AUTO_MIGRATE=false` the server **refuses to start** while migrations are
+  pending and lists them, so a deploy can gate on an explicit `migrate.py up`.
+- **Drift is refused.** If a migration file is edited after it was applied, the
+  recorded checksum no longer matches and `migrate.py up` stops with an error
+  rather than applying the rest against an unknown state.
+- **No downgrades.** SQLite cannot drop or retype columns portably, so the
+  rollback path is the pre-migration backup.
+
+### Adding a migration
+
+Create the next number in `migrations/`. Two forms are supported:
+
+```
+migrations/0003_add_thing.sql     plain statements, run in one transaction
+migrations/0003_add_thing.py      def up(conn): ...  (for conditional DDL)
+```
+
+Use SQL when possible. Reach for Python when you need conditional logic or a data
+backfill, and set `MANAGES_TRANSACTION = True` at module level if the migration
+must control its own transaction (for example a table rebuild that needs
+`PRAGMA foreign_keys = OFF`, which SQLite refuses to change inside a
+transaction).
+
+Note for `.sql` migrations: the statement splitter understands string literals,
+identifiers and comments, but not `;` inside a trigger `BEGIN...END` body — write
+those as a Python migration.
+
+### Adopting the system on an existing database
+
+Nothing special is required. Migration `0001_initial` uses only
+`CREATE TABLE IF NOT EXISTS`, so running it against an existing database is a
+no-op that leaves data alone, and `0002_legacy_columns` adds (conditionally) the
+columns that older releases introduced through ad-hoc `ALTER TABLE` calls. Point
+`DB_PATH` at the old file and run `python scripts/migrate.py up`.
 
 ## File upload validation
 
@@ -441,6 +504,10 @@ is the client's declaration trusted. All concurrency tests live in
 ## Admin scripts
 
 ```bash
+python scripts/init_db.py                     # create or upgrade the schema (safe to repeat)
+python scripts/migrate.py status              # show applied and pending migrations
+python scripts/migrate.py up                  # apply pending migrations (backup first)
+python scripts/migrate.py schema              # print the DDL produced by the chain
 python scripts/manage.py list-agents
 python scripts/manage.py reset-token <name>   # new secret, shown once
 python scripts/manage.py suspend <name>       # temporary suspension
@@ -512,9 +579,9 @@ Database backup: `sqlite3 data/relay.db ".backup backup.db"`.
 python -m pytest tests/ -q
 ```
 
-Latest result: 161 tests passing (13 auth, 18 messages, 20 files, 20 hardening,
-13 upload concurrency, 30 dashboard, 5 directory, 5 safe_text, 23 feature, 14
-integration — including the load test).
+Latest result: 181 tests passing (13 auth, 18 messages, 20 files, 20 hardening,
+13 upload concurrency, 30 dashboard, 5 directory, 5 safe_text, 23 feature,
+20 migrations, 14 integration — including the load test).
 
 The integration tests run a real uvicorn server in a separate thread together
 with genuine Hermes clients. The load scenario covers 10 agents and a burst of
@@ -540,16 +607,17 @@ relay-server/
 ├── app/
 │   ├── main.py            # app factory, exception handlers, error envelope
 │   ├── config.py          # settings from .env
-│   ├── database.py        # SQLite connections (WAL, FK, busy_timeout) + column migrations
+│   ├── database.py        # SQLite connections (WAL, FK, busy_timeout) + startup guard
+│   ├── migrations.py      # versioned migration engine (discovery, ledger, backup)
 │   ├── ratelimit.py       # slowapi limiter
 │   ├── security.py        # secrets, hashing, get_current_agent, require_scope
 │   ├── schemas.py         # Pydantic models
 │   ├── dashboard/         # admin dashboard: JWT auth, routes, static assets
 │   ├── routers/           # register, messages, files, uploads, groups, tokens
 │   └── services/          # message_service, file_service, audit_service
-├── scripts/               # init_db, manage, cleanup
-├── tests/                 # auth, messages, files, dashboard, hardening, features, integration
-├── schema.sql
+├── migrations/            # ordered schema chain (0001_initial.sql, ...)
+├── scripts/               # init_db, migrate, manage, cleanup
+├── tests/                 # auth, messages, files, dashboard, hardening, features, migrations, integration
 └── requirements.txt
 ```
 
@@ -565,9 +633,11 @@ relay-server/
   responses (the server already sends `X-Accel-Buffering: no` for Nginx) and set
   `read_timeout` above `SSE_HEARTBEAT_SECONDS`. Plain polling remains the
   fallback.
-- Schema changes beyond adding a column still require Alembic or a manual
-  migration; today, changing the schema in development means deleting
-  `data/relay.db` and re-running `scripts/init_db.py`.
+- Schema changes are handled by the migration chain (see
+  [Database schema and migrations](#database-schema-and-migrations)); no step
+  requires deleting the database. Downgrades are the one gap: SQLite cannot drop
+  or retype columns portably, so rollback means restoring the pre-migration
+  backup.
 - The relay server reads message and file content by design: it needs plaintext
   for SHA-256 deduplication, magic-byte validation, and for the admin dashboard
   to display messages. Content is therefore **not** end-to-end encrypted — the

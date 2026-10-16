@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     registration_key: str = "change-me-in-env"
     db_path: Path = Path("data/relay.db")
     filemanager_dir: Path = Path("filemanager")
+    # Apply pending migrations on startup. Set to false to require an explicit
+    # `python scripts/migrate.py up` (the server then refuses to start while
+    # migrations are pending).
+    auto_migrate: bool = True
     max_upload_mb: int = Field(default=25, ge=1, le=1024)
     blocked_ext: str = ".exe,.bat,.cmd,.msi,.dll,.scr,.ps1"
     retention_days: int = 30
