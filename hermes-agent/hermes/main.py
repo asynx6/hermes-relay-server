@@ -433,10 +433,10 @@ def _transport(config, args) -> dict:
 
 def build_poller(config, api, memory, file_handler, *, wait_seconds: int = 0,
                  use_sse: bool = False) -> Poller:
-    """Bentuk Poller lengkap dengan opsi transport.
+    """Build a Poller with the given transport options.
 
-    Satu titik konstruksi untuk `poll` dan `fetch-once`, supaya keduanya tidak
-    bisa berbeda soal interval maupun transport.
+    Single construction point for `poll` and `fetch-once`, so the two can never
+    disagree about interval or transport.
     """
     return Poller(
         api, memory, file_handler,
